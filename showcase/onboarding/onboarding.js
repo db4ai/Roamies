@@ -431,8 +431,9 @@
     },
     enter() {
       ai.render();
-      setTimeout(() => at('ai') && quip(state?.connected ? 'Already connected!' : 'Pick one you have'), 700);
-      if (state?.connected) setTimeout(() => at('ai') && act('hype'), 900);
+      renderLocal();
+      setTimeout(() => at('ai') && quip(state?.connected ? 'Already connected!' : state?.local?.on ? 'Already on your DGX!' : 'Pick one you have'), 700);
+      if (state?.connected || state?.local?.on) setTimeout(() => at('ai') && act('hype'), 900);
       else poseFn = POSE.point(1.7, 0.05);
       aim($('providers'));
     },
@@ -456,6 +457,42 @@
   $('key-link').addEventListener('click', () => {
     const k = (state?.apikey ?? []).find((p) => p.id === ai.key);
     if (k?.link) { send({ type: 'open_link', url: k.link }); quip('Copy it, then paste here'); }
+  });
+  // A local gateway (LiteLLM on the user's own DGX/IGX): no account and no cloud bill. The presets fill the URL
+  // and a sensible model, and everything stays editable. Saving asks the sidecar to verify it before moving on.
+  const local = { busy: false, preset: null };
+  function renderLocal() {
+    const L = state?.local;
+    $('local-ai').hidden = !L;
+    if (!L) return;
+    const presets = L.presets ?? [];
+    $('local-presets').replaceChildren(...presets.map((p) => {
+      const on = local.preset === p.id || (!local.preset && L.on && L.baseUrl === p.baseUrl);
+      const b = el('button', { className: `px prov${on ? ' on' : ''}`, type: 'button' },
+        el('span', { textContent: p.label }), led(on ? 'on' : ''),
+        el('small', { textContent: L.on && L.baseUrl === p.baseUrl ? 'In use' : new URL(p.baseUrl).host }));
+      b.setAttribute('aria-pressed', String(on));
+      b.onclick = () => {
+        local.preset = p.id;
+        $('local-url').value = p.baseUrl;
+        $('local-model').value = L.model && L.baseUrl === p.baseUrl ? L.model : (p.models?.[0] ?? '');
+        quip(`${p.label}, nice`, 2);
+        renderLocal();
+      };
+      return b;
+    }));
+    if (!$('local-url').value) $('local-url').value = L.baseUrl || presets[0]?.baseUrl || '';
+    if (!$('local-model').value) $('local-model').value = L.model || presets[0]?.models?.[0] || '';
+    $('local-save').disabled = local.busy;
+  }
+  $('local-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const baseUrl = $('local-url').value.trim(), modelId = $('local-model').value.trim();
+    if (!baseUrl || !modelId) return (!baseUrl ? $('local-url') : $('local-model')).focus();
+    local.busy = true; $('local-save').disabled = true; $('local-error').hidden = true;
+    poseFn = POSE.think();
+    send({ type: 'panel_local', enabled: true, baseUrl, modelId, key: $('local-key').value.trim(), context: null });
+    $('local-key').value = '';
   });
   $('key-form').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1064,7 +1101,7 @@
     { name: 'welcome', enter: 'drop', next: "Let's go", onEnter: () => { look.render(); setTimeout(() => { if (at('welcome')) { act('wave'); quip('Hi there!'); } }, 650); } },
     // Windows: the voice download is optional, so it can be skipped.
     { name: 'perms', enter: 'materialize', next: 'Continue', onEnter: perms.enter, onLeave: perms.leave, ready: () => perms.done(), get skip() { return !isMac(); } },
-    { name: 'ai', enter: 'crt', next: 'Continue', onEnter: ai.enter, onLeave: ai.leave, ready: () => !!state?.connected, skip: true },
+    { name: 'ai', enter: 'crt', next: 'Continue', onEnter: ai.enter, onLeave: ai.leave, ready: () => !!(state?.connected || state?.local?.on), skip: true },
     { name: 'voice', enter: 'materialize', next: 'Continue', onEnter: replies.enter, onLeave: replies.leave, ready: () => replies.ready(), skip: true },
     { name: 'demo', enter: 'crt', next: 'Continue', onEnter: demo.enter, onLeave: demo.leave },
     { name: 'keys', enter: 'materialize', next: 'Continue', onEnter: keys.enter, onLeave: keys.leave },
@@ -1159,6 +1196,18 @@
         keys.render();
         break;
       case 'say': quip(msg.text, 3); break;
+      // A Local gateway save (from the setup guide): report it here and let the step re-render as connected.
+      case 'local_note': {
+        local.busy = false;
+        const e = $('local-error');
+        e.hidden = !msg.bad;
+        e.textContent = e.title = msg.bad ? msg.text : '';
+        if (!msg.bad) { quip('On your own machine!', 3); act('hype'); }
+        else quip('That did not take', 3);
+        if (at('ai')) { ai.render(); renderLocal(); }
+        nav?.();
+        break;
+      }
       case 'showcase': demo.on(msg); break;
       case 'voice': if (at('chat')) chat.voice(msg); else voice.on(msg); break;
       case 'speech': Roamie.voiceOut?.handle(msg); break;

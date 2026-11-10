@@ -200,7 +200,7 @@ async function verifyLocal(n = {}) {
       const detail = await res.text().catch(() => '');
       const hint = res.status === 401 || res.status === 403 ? ' — check the virtual key'
         : res.status === 404 ? ' — is that the /v1 base?' : '';
-      panelNote(`The gateway answered ${res.status}${hint}${detail ? `: ${detail.slice(0, 100)}` : ''}`, true);
+      noteAnywhere(`The gateway answered ${res.status}${hint}${detail ? `: ${detail.slice(0, 100)}` : ''}`, true);
       logLine('local_verify', { ok: false, status: res.status, model: n.model });
       return false;
     }
@@ -210,13 +210,13 @@ async function verifyLocal(n = {}) {
     // The model list is authoritative here: a key scoped to other models will 403 on the first real request, so
     // catch that at save time instead.
     if (ids.length && !ids.includes(n.model)) {
-      panelNote(`That key doesn't offer ${n.model}. It can use: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? '…' : ''}`, true);
+      noteAnywhere(`That key doesn't offer ${n.model}. It can use: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? '…' : ''}`, true);
       return false;
     }
     return true;
   } catch (e) {
     const timedOut = /timeout|abort/i.test(String(e?.message ?? ''));
-    panelNote(timedOut
+    noteAnywhere(timedOut
       ? `No answer from ${new URL(n.baseUrl).host} in 20s. Is the gateway up?`
       : `Could not reach the gateway: ${String(e?.message ?? e).slice(0, 110)}`, true);
     logLine('local_verify', { ok: false, error: String(e?.message ?? e).slice(0, 200) });
@@ -1298,6 +1298,12 @@ function panel() {
   setImmediate(() => { panelQueued = false; if (panelOpen) send({ type: 'panel', msg: { kind: 'state', state: panelState() } }); });
 }
 const panelNote = (text, bad = false) => panelOpen && send({ type: 'panel', msg: { kind: 'note', text, bad } });
+// While the setup guide is open it's the visible surface, so a Local save must report there too (the panel may
+// not have been opened at all yet).
+const noteAnywhere = (text, bad = false) => {
+  if (onboarding) ob({ kind: 'local_note', text, bad });
+  else panelNote(text, bad);
+};
 function panelState() {
   const current = modelMeta(config.model);
   const doing = activity.doing();
@@ -1440,11 +1446,11 @@ async function saveLocal(m) {
     keyName: String(m.keyName ?? config.local?.keyName ?? 'local-llm'),
   };
   const normalized = normalizeLocal(next);
-  if (!normalized) return panelNote('That gateway URL is not valid. Use http://192.168.2.146:4000/v1.', true);
-  if (!normalized.model) return panelNote('Pick a model first.', true);
+  if (!normalized) return noteAnywhere('That gateway URL is not valid. Use http://192.168.2.146:4000/v1.', true);
+  if (!normalized.model) return noteAnywhere('Pick a model first.', true);
   config.local = next;
   if (typeof m.key === 'string' && m.key.trim()) {
-    await secrets.set(next.keyName, m.key.trim()).catch((e) => panelNote(`The keychain refused the key: ${e.message}`, true));
+    await secrets.set(next.keyName, m.key.trim()).catch((e) => noteAnywhere(`The keychain refused the key: ${e.message}`, true));
   }
   saveConfig();
   agent = null; // the next request rebuilds the agent on the new route
@@ -1453,8 +1459,9 @@ async function saveLocal(m) {
     const ok = await verifyLocal(normalized);
     if (!ok) return panel();
   }
-  panelNote(isLocalEnabled(config.local) ? `Local model ready: ${normalized.model} on ${new URL(normalized.baseUrl).host}.` : 'Local model switched off.');
+  noteAnywhere(isLocalEnabled(config.local) ? `Local model ready: ${normalized.model} on ${new URL(normalized.baseUrl).host}.` : 'Local model switched off.');
   panel();
+  if (onboarding) obState();
 }
 
 // Save the Local voice (Qwen3-TTS on the DGX) from the panel, then prove it speaks.
@@ -1468,11 +1475,11 @@ async function saveLocalVoice(m) {
     voice: String(m.voice ?? config.localVoice?.voice ?? LOCAL_TTS_DEFAULT_VOICE),
     keyName: String(m.keyName ?? config.localVoice?.keyName ?? 'local-tts'),
   };
-  if (next.enabled && !baseUrl) return panelNote('Set the TTS server URL first, e.g. http://192.168.2.146:8092.', true);
+  if (next.enabled && !baseUrl) return noteAnywhere('Set the TTS server URL first, e.g. http://192.168.2.146:8092.', true);
   config.localVoice = next;
   if (typeof m.key === 'string' && m.key.trim()) {
     localVoiceKey = m.key.trim();
-    await secrets.set(next.keyName, localVoiceKey).catch((e) => panelNote(`The keychain refused the key: ${e.message}`, true));
+    await secrets.set(next.keyName, localVoiceKey).catch((e) => noteAnywhere(`The keychain refused the key: ${e.message}`, true));
   }
   configureLocalVoice();
   saveConfig();
@@ -1481,7 +1488,7 @@ async function saveLocalVoice(m) {
     const ok = await verifyLocalVoice();
     if (!ok) return panel();
   }
-  panelNote(localVoiceReady() && localVoiceKey ? `Local voice ready on ${new URL(baseUrl).host}.` : 'Local voice switched off.');
+  noteAnywhere(localVoiceReady() && localVoiceKey ? `Local voice ready on ${new URL(baseUrl).host}.` : 'Local voice switched off.');
   panel();
 }
 
@@ -1683,6 +1690,13 @@ function obState() {
     size: config.size ?? 'default',
     replies: config.replies === 'voice' ? 'voice' : 'text',
     fishKey: speech.on,
+    // The Local gateway, so the setup guide can offer it next to the cloud sign-ins.
+    local: {
+      on: isLocalEnabled(config.local),
+      baseUrl: normalizeLocal(config.local)?.baseUrl ?? '',
+      model: normalizeLocal(config.local)?.model ?? null,
+      presets: LOCAL_PRESETS,
+    },
   });
 }
 
