@@ -129,7 +129,7 @@
     const ORDER = ['materialize', 'crt', 'drop'];
     const forcedVariant = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('enter') : null;
     // ptr: the real cursor whenever it's on this screen (even when it hasn't moved for a while), else null.
-    const presence = { auto: false, idle: 3, summonIdle: 9, lastActive: 0, summoned: false, cursor: null, ptr: null, n: 0 };
+    const presence = { auto: false, idle: 1.5, summonIdle: 4.5, lastActive: 0, summoned: false, cursor: null, ptr: null, n: 0 };
     let SAFE = R.safe;
     // The visible screen: overlay minus menu bar / Dock / taskbar.
     const bounds = () => ({ l: SAFE.left, t: SAFE.top, r: W - SAFE.right, b: H - SAFE.bottom });
@@ -143,7 +143,8 @@
     // home: where it was when taken, to go back to when the cursor isn't on this screen. tw: running moves (resolved on the agent's clock). idle: a
     // little motion while parked on a control (tapping, circling).
     // speed: above 1 when a drawing has fallen behind its voice and is catching up.
-    const pen = { held: false, tip: [0, 0], home: null, follow: false, tw: [], idle: null, idleAt: 0, reduced: false, v: [0, 0], speed: 1 };
+    // owner: who took it, a drawing ('ink') or its work in another app ('hand').
+    const pen = { held: false, owner: null, tip: [0, 0], home: null, follow: false, tw: [], idle: null, idleAt: 0, reduced: false, v: [0, 0], speed: 1 };
     const AVOID = () => k.R * 5;
     const spotOK = (x, y) => {
       const S = bounds(), r = k.R;
@@ -237,7 +238,7 @@
       const dur = clamp(0.16 + d / 2600, 0.18, 0.5), c = [(x0 + x) / 2 - (y - y0) * 0.1, (y0 + y) / 2 + (x - x0) * 0.08];
       return penTween(dur, (u) => { const e = penEase(u); pen.tip = [(1 - e) ** 2 * x0 + 2 * (1 - e) * e * c[0] + e * e * x, (1 - e) ** 2 * y0 + 2 * (1 - e) * e * c[1] + e * e * y]; });
     };
-    const penRelease = () => { pen.held = false; pen.idle = null; for (const t of pen.tw) t.res(); pen.tw = []; if (m.drive === penDrive) m.drive = null; };
+    const penRelease = () => { pen.held = false; pen.owner = null; pen.idle = null; for (const t of pen.tw) t.res(); pen.tw = []; if (m.drive === penDrive) m.drive = null; };
     const penDrive = (dt) => {
       const [ox, oy] = tipOff(), x = pen.tip[0] + ox, y = pen.tip[1] + oy;
       if (dt > 0) { m.vx = (x - m.x) / dt; m.vy = (y - m.y) / dt; }
@@ -359,7 +360,11 @@
     const dotsDx = (bb) => (bb.kind === 'thought' && bb.text ? DOTS_W + 10 : 0);
     // Under a question: how to answer it.
     const HINT = 'enter to send · esc to skip', HINT_F = `400 11px ${G.MONO}`, HINT_H = 18;
-    const hintH = (bb) => (bb.input && !bb.input.listen ? HINT_H : 0);
+    const hintH = (bb) => (bb.input && !bb.input.listen && !bb.input.choices ? HINT_H : 0);
+    // A yes/no question: its buttons sit in a row under it instead of the hint.
+    const CHOICE_GAP = 8, CHOICE_TOP = 12;
+    const choicesW = (bb) => bb.input.choices.labels.reduce((s, l, i) => s + G.chipW(l) + (i ? CHOICE_GAP : 0), 0);
+    const footH = (bb) => (bb.input?.choices ? CHOICE_TOP + G.CHIP_H + 4 : hintH(bb));
 
     const make = (kind) => ({
       kind, text: '', lines: [{ start: 0, s: '' }], shown: 0, at: [], ended: false, age: 0, wait: 0,
@@ -430,7 +435,8 @@
         for (const l of src) cols = Math.max(cols, Math.min(l.s.length + 1, MAX_COLS));
         const rows = clamp(src.length, 1, MAX_LINES);
         const meter = bb.input.listen ? (METER + 1) * k.P : 0;
-        return { cols, rows, maxRows: MAX_LINES, w: Math.max(cols * colW(t), hintH(bb) ? G.textW(HINT, HINT_F) : 0), h: rows * CH * t + meter + hintH(bb) };
+        const footW = bb.input.choices ? choicesW(bb) : hintH(bb) ? G.textW(HINT, HINT_F) : 0;
+        return { cols, rows, maxRows: MAX_LINES, w: Math.max(cols * colW(t), footW), h: rows * CH * t + meter + footH(bb) };
       }
       const shownLines = bb.lines.filter((l) => l.start < Math.max(1, bb.shown) || l === bb.lines[0]);
       let cols = 4;
@@ -542,7 +548,7 @@
       if (bb.closing) { bb.closing += dt; return; }
       if (done) {
         if (!bb.hover && !bb.expanded && !R.voiceOut?.playing()) bb.dwell += dt;
-        const linger = clamp(2.2 + bb.text.length * 0.03, 2.6, bb.overflow ? 16 : 9);
+        const linger = clamp(1.1 + bb.text.length * 0.015, 1.3, bb.overflow ? 8 : 4.5);
         if (bb.kind === 'speech' && bb.dwell > linger) close(bb);
         if (bb.kind === 'thought' && bb.dwell > 0.4) close(bb);
       }
@@ -610,6 +616,20 @@
         ctx.restore();
       }
       if (hintH(bb) && bb.pop.x > 0.6) G.typed(ctx, HINT, f.x + padX(bb), f.y + f.h - padY(bb) - HINT_H / 2 + 2, HINT_F, G.DIM);
+      const ch = bb.input?.choices;
+      if (ch) {
+        ch.rects = [];
+        if (bb.pop.x > 0.6 && !bb.closing) {
+          let x = f.x + padX(bb);
+          const y = f.y + f.h - padY(bb) - G.CHIP_H - 4;
+          ch.labels.forEach((l, i) => {
+            const w = G.chipW(l);
+            G.chip(ctx, x, y, w, G.CHIP_H, l, { filled: i === 0, hover: ch.hover === i, focus: ch.sel === i, down: ch.down === i });
+            ch.rects.push([x, y, w, G.CHIP_H]);
+            x += w + CHOICE_GAP;
+          });
+        }
+      }
       // Long text: a thin scrollbar, and a little chevron while there's more below.
       if (bb.overflow && bb.kind === 'speech') {
         const bx = f.x + f.w - 7, top = f.y + padY(bb), len = Math.max(4, f.h - padY(bb) * 2);
@@ -640,7 +660,7 @@
       if (tcan.width !== pw || tcan.height !== phh) { tcan.width = pw; tcan.height = phh; }
       tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       tctx.clearRect(0, 0, iw + 2, ih + 2);
-      const dim = bb.kind === 'thought' || ph;
+      const dim = bb.kind === 'thought' || (ph && !bb.input.choices);
       const lines = ph ? wrap(bb.input.placeholder || '', MAX_COLS) : bb.lines;
       const s0 = ph ? 0 : bb.scroll.x, first = Math.max(0, Math.floor(s0)), last = Math.min(lines.length - 1, first + bb.rows);
       const shown = ph ? 1e9 : Math.floor(bb.shown);
@@ -689,7 +709,7 @@
         }
       }
       tctx.globalAlpha = 1;
-      if (bb.input?.focused && !bb.input.listen && Math.floor((now - bb.input.caretAt) * 2.2) % 2 === 0) {
+      if (bb.input?.focused && !bb.input.listen && !bb.input.choices && Math.floor((now - bb.input.caretAt) * 2.2) % 2 === 0) {
         // caret where the next letter goes (or at the start, over the placeholder)
         let li = 0, col = 0;
         if (bb.text) ({ li, col } = caretAt(bb.lines, bb.input.caret ?? bb.text.length));
@@ -698,7 +718,7 @@
         if (cy > -1 && cy < ih) { tctx.fillStyle = css(HOT); tctx.fillRect(col * cw + 0.5, cy + lh * 0.15, Math.max(1.5, t * 0.8), lh * 0.7); }
       }
       // Clip to the frame as it is this instant: it may still be growing, or shrinking away on close.
-      const cx1 = fr.x + fr.w - padX(bb) + 2, cy1 = fr.y + fr.h - padY(bb) - (bb.input?.listen ? (METER + 1) * P : 0) - hintH(bb) + 2;
+      const cx1 = fr.x + fr.w - padX(bb) + 2, cy1 = fr.y + fr.h - padY(bb) - (bb.input?.listen ? (METER + 1) * P : 0) - footH(bb) + 2;
       const cwid = Math.min(iw + t, cx1 - ix), chgt = Math.min(ih + t, cy1 - iy);
       if (cwid <= t || chgt <= t) return;
       ctx.save();
@@ -762,6 +782,33 @@
 
     const hitBubble = (bb, x, y) => bb && !bb.closing && x >= bb.x.x && x <= bb.x.x + bb.w.x && y >= bb.y.x && y <= bb.y.x + bb.h.x;
 
+    // Back beside the cursor wherever it is now (they may have moved on meanwhile), else where it was when taken.
+    const penHome = () => (presence.ptr && besideCursor(fol.side < 0 ? 'left' : 'right', presence.ptr)) ?? pen.home ?? [m.x, m.y];
+    // Working in another app (act_in_app): it turns into its cursor and blinks from spot to spot as the helper reports
+    // them, then back beside the user's cursor. Held like a drawing's pen, so it no longer chases the real cursor when
+    // a step borrows it. Clicks don't wait for it: when spots come faster than it hops, it skips to the newest one.
+    const hand = { want: false, took: false, next: null, running: null };
+    const handHolds = () => pen.held && pen.owner === 'hand';
+    const handRun = async () => {
+      for (;;) {
+        if (hand.want && !hand.took) {
+          // Once per piece of work: hidden with Esc meanwhile, it stays hidden. A drawing's pen is left alone.
+          hand.took = true;
+          if (!pen.held) await api.pen.take('hand');
+        } else if (hand.want && hand.next && handHolds()) {
+          const [x, y] = hand.next;
+          hand.next = null;
+          await api.pen.jump(x, y);
+          if (handHolds()) await api.pen.tap(x, y);
+        } else if (!hand.want && handHolds()) {
+          const [hx, hy] = penHome(), [ox, oy] = tipOff();
+          await api.pen.jump(hx - ox, hy - oy);
+          if (handHolds()) await api.pen.release();
+        } else return;
+      }
+    };
+    const handKick = () => (hand.running ??= handRun().catch((e) => console.error('hand', e)).finally(() => { hand.running = null; }));
+
     const api = {
       say: (text, opts) => { ensureShown(); return open('speech', text, opts); },
       think: (text, opts = {}) => {
@@ -810,7 +857,8 @@
         set speed(v) { pen.speed = clamp(v, 1, 3); },
         get tip() { return pen.tip.slice(); },
         get home() { return pen.home?.slice() ?? null; },
-        async take() {
+        async take(owner = 'ink') {
+          pen.owner = owner;
           ensureShown();
           if (b) close(b);
           k.stopAct?.();
@@ -824,6 +872,11 @@
           if (k.form !== 'cursor') await k.morph?.('cursor');
         },
         move: (x, y) => penFly(x, y),
+        // A hop, not a glide: it blinks out and comes back on with its tip at (x, y).
+        jump(x, y) {
+          pen.idle = null;
+          return k.blink?.(() => { if (pen.held) { pen.tip = [x, y]; penDrive(0); m.vx = m.vy = 0; } }) ?? Promise.resolve();
+        },
         // Straight there this frame (it's dragging something: a card's corner, a part being moved).
         set(x, y) { if (pen.held && !pen.tw.length) { pen.idle = null; pen.tip = [x, y]; } },
         async trace(pts, dur, onP = () => {}) {
@@ -844,8 +897,7 @@
         async release() {
           if (!pen.held) return;
           pen.idle = null;
-          // Back beside the cursor wherever it is now (they may have moved on while it drew), else where it started.
-          const [hx, hy] = (presence.ptr && besideCursor(fol.side < 0 ? 'left' : 'right', presence.ptr)) ?? pen.home ?? [m.x, m.y], [ox, oy] = tipOff();
+          const [hx, hy] = penHome(), [ox, oy] = tipOff();
           await penFly(hx - ox, hy - oy);
           if (!pen.held) return;
           penRelease();
@@ -856,6 +908,13 @@
           if (k.userForm && k.userForm !== k.form) await k.morph?.(k.userForm);
         },
       },
+      // Its work in another app: begin() when a step lands somewhere or takes the real cursor, at() for each spot
+      // (overlay px), end() when the work is over (resolves once it is back to its own size beside the cursor).
+      hand: {
+        begin() { if (!hand.want) { hand.want = true; handKick(); } },
+        at(x, y) { if (hand.want) { hand.next = [x, y]; handKick(); } },
+        end() { hand.want = false; hand.took = false; hand.next = null; return handKick(); },
+      },
       // Make (x, y) home and move there now, e.g. to restore where the user last left it.
       place: (x, y) => {
         setStation(x, y); m.x = x; m.y = y; m.vx = m.vy = 0; m.mode = 'rest'; m.rest = 1;
@@ -863,6 +922,8 @@
       },
       setAuto: (on, idle) => { presence.auto = !!on; if (idle) presence.idle = idle; presence.lastActive = now; },
       get visible() { return visible(); },
+      // The speech bubble is still typing its words out.
+      typing: () => !!b && b.kind === 'speech' && b.shown < b.text.length,
       get station() { return { ...station }; },
       // Where it is, or where it's arriving (an entrance can start off to the side).
       get pos() { return k.presence === 'in' && station.x != null ? { x: station.x, y: station.y, r: m.radius } : { x: m.x, y: m.y, r: m.radius }; },
@@ -898,8 +959,12 @@
         const h = open('speech', '', { stream: true });
         const bb = b;
         bb.input = { placeholder: opts.placeholder ?? '', mask: !!opts.mask, focused: true, caretAt: now, onPress: opts.onPress };
+        // choices: buttons instead of typing; onChoose(i) when one is clicked. Nothing is highlighted at first.
+        if (opts.choices?.length) bb.input.choices = { labels: opts.choices.map(String), sel: -1, hover: -1, down: -1, rects: [], onChoose: opts.onChoose };
         bb.wait = 0;
         return {
+          // The keyboard's highlighted button (-1: none).
+          select(i) { const ch = bb.input.choices; if (ch && ch.sel !== i) { ch.sel = i; k.S('tick'); } return this; },
           // caret: where the field's own caret is (it moves with the arrow keys and clicks); the end if not given.
           set(value, caret = value.length) {
             const v = bb.input.mask ? '•'.repeat(value.length) : value;
@@ -964,6 +1029,12 @@
       hit: (x, y) => hitBubble(b, x, y),
       press: (x, y) => {
         if (!b) return;
+        const ch = b.input?.choices;
+        if (ch) {
+          const i = ch.rects.findIndex((r) => x >= r[0] && x <= r[0] + r[2] && y >= r[1] - 2 && y <= r[1] + r[3] + 3);
+          if (i >= 0) { ch.down = i; ch.onChoose?.(i); } else b.input.onPress?.();
+          return;
+        }
         if (b.input) { b.input.onPress?.(); return; }
         if (b.overflow || b.expanded) { b.expanded = !b.expanded; b.follow = false; b.dwell = 0; k.S('expand'); if (!b.expanded) b.scrollTarget = 0; }
         else close(b);
@@ -1111,6 +1182,8 @@
         }
         if (b) {
           b.hover = env.mouse.active && hitBubble(b, env.mouse.x, env.mouse.y);
+          const ch = b.input?.choices;
+          if (ch) ch.hover = b.hover ? ch.rects.findIndex((r) => env.mouse.x >= r[0] && env.mouse.x <= r[0] + r[2] && env.mouse.y >= r[1] - 2 && env.mouse.y <= r[1] + r[3] + 3) : -1;
           step(b, dt, env);
           if (b?.input?.listen && !tool) { face.lookX = R.damp(face.lookX, 0.25, 6, dt); face.lookY = R.damp(face.lookY, 0.05, 6, dt); }
           else if (b && (b.kind === 'thought' || b.input) && !tool) { face.lookX = R.damp(face.lookX, clamp((b.x.x + b.w.x / 2 - m.x) / 160, -0.9, 0.9), 6, dt); face.lookY = R.damp(face.lookY, b.below ? 0.8 : -0.85, 6, dt); }

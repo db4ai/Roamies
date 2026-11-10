@@ -77,6 +77,19 @@ func mainWindow(_ wins: [Win]) -> Win? {
     return wins.first { !$0.title.isEmpty || $0.w * $0.h >= big * 0.05 } ?? wins.first
 }
 
+// The same app's windows that opened over the plan's window (a new document, a dialog), front first, at most 3;
+// all of that app's windows when the plan's window has closed. Never the older windows behind it.
+func newerWindows(_ all: [Win], pinned: Win) -> [Win] {
+    let own = all.filter { $0.pid == pinned.pid }
+    return Array((own.firstIndex { $0.id == pinned.id }.map { own[..<$0] } ?? own[...]).prefix(3))
+}
+
+// The plan's window as it is now (it may have moved or been resized); once it has closed, that app's front window.
+// nil: the app has no window open.
+func currentWindow(_ all: [Win], pinned: Win) -> Win? {
+    all.first { $0.id == pinned.id } ?? mainWindow(all.filter { $0.pid == pinned.pid })
+}
+
 /// What a window capture really shows, when it isn't just the window: macOS adds the window's child windows
 /// (CapCut's EditPilot button hangs past its corner), so the picture covers both. nil: the window alone.
 func shotArea(_ w: Win, _ all: [Win], _ px: [Int]) -> CGRect? {
@@ -191,7 +204,7 @@ func axWindow(_ app: AXUIElement, _ w: Win?) -> AXUIElement? {
 func frontPid() -> pid_t? { NSWorkspace.shared.frontmostApplication?.processIdentifier }
 
 /// Brings the window's app forward and waits until macOS reports it frontmost (up to ~1.2 s).
-func bringToFront(_ w: Win, _ app: AXUIElement) -> Bool {
+func bringToFront(_ w: Win, _ app: AXUIElement, raise: Bool = true) -> Bool {
     if BG, !fgActive { return true }
     if frontPid() == w.pid { return true }
     let run = NSRunningApplication(processIdentifier: w.pid)
@@ -199,7 +212,7 @@ func bringToFront(_ w: Win, _ app: AXUIElement) -> Bool {
         run?.unhide()
         run?.activate(options: [.activateAllWindows])
         AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        if let win = axWindow(app, w) { AXUIElementPerformAction(win, kAXRaiseAction as CFString) }
+        if raise, let win = axWindow(app, w) { AXUIElementPerformAction(win, kAXRaiseAction as CFString) }
         if attempt == 2, let url = run?.bundleURL {
             // Last resort: open the app again, which macOS always honours.
             let cfg = NSWorkspace.OpenConfiguration(); cfg.activates = true
@@ -976,17 +989,30 @@ func borrowEnd(_ saved: (CGPoint?, NSRunningApplication?), _ w: Win) {
     if let prev = saved.1, prev.processIdentifier != w.pid, !isRoamies(prev.processIdentifier) { prev.activate(options: []) }
     progress(["ev": "return"])
 }
+/// Set when a borrowed step's app didn't come forward, so nothing was pressed: why, for that step's error.
+var wrongFront: String? = nil
+/// After a borrowed step asked its app to come forward: nil to go ahead, else why it stops. Real keys and clicks
+/// land in whichever app is in front, so with anything but the target app there nothing is pressed.
+func borrowVerdict(target: String, targetPid: pid_t, frontPid: pid_t?, frontName: String?) -> String? {
+    if frontPid == targetPid { return nil }
+    let other = frontName.flatMap { $0.isEmpty ? nil : $0 } ?? "another app"
+    return "\(other) is in front instead of \(target), so I stopped before pressing keys in the wrong app."
+}
 /// What to give back once this run ends, after a step took the real cursor and keyboard.
 var borrowed: (CGPoint?, NSRunningApplication?)? = nil
 /// Runs body with the real cursor and keyboard. They stay borrowed (the app in front) until the run ends: an app in the
 /// background ignores keys sent to it, so a Return after a borrowed fill did nothing and the search never ran.
 @discardableResult
-func withRealCursor<T>(_ body: () -> T) -> T? {
+func withRealCursor<T>(raise: Bool = true, _ body: () -> T) -> T? {
     guard BG, !fgActive, let w = bgWin, let app = bgApp else { return body() }
     usedRealCursor = true
     guard let saved = borrowBegin() else { userBusy = true; return nil }
     borrowed = saved; fgActive = true
-    _ = bringToFront(w, app)
+    _ = bringToFront(w, app, raise: raise)
+    let front = NSWorkspace.shared.frontmostApplication
+    if let why = borrowVerdict(target: w.app, targetPid: w.pid, frontPid: front?.processIdentifier, frontName: front?.localizedName) {
+        giveBack(); wrongFront = why; return nil
+    }
     return body()
 }
 /// Gives the cursor and the front app back, if a step borrowed them.
@@ -1049,25 +1075,39 @@ func saveInBackground(_ w: Win) -> Bool {
     """
     return run("/usr/bin/osascript", ["-e", script]) == 0
 }
+enum MenuShortcut { case pressed, greyedOut, notFound }
+enum ShortcutRoute { case menu, realKeyboard, sendKey }
+// Measured with TextEdit behind another app: Close reads greyed out there and Cmd+W sent to it does nothing, so a
+// greyed-out item needs the real keyboard. Items that read enabled are still pressed in place.
+let MENU_WORKS_BEHIND = true
+// In front the key goes straight to the app. Behind: the menu item if it was pressed, the real keyboard (app brought
+// forward, then given back) if it is greyed out or menus can't be trusted there, else the key is sent to the app.
+func shortcutRoute(item: MenuShortcut, appInFront: Bool, trustMenu: Bool) -> ShortcutRoute {
+    if appInFront || item == .notFound { return .sendKey }
+    return item == .pressed && trustMenu ? .menu : .realKeyboard
+}
 /// Cmd shortcuts in the background: press the app's menu item that has that shortcut (keys sent to a background
-/// app don't reach its menus, so Cmd+S typed the line but never saved). False if no menu item has it.
-func pressMenuShortcut(_ app: AXUIElement, _ combo: String) -> Bool {
+/// app don't reach its menus, so Cmd+S typed the line but never saved). press: false only looks, so an item that
+/// could be pressed still reads .pressed.
+func pressMenuShortcut(_ app: AXUIElement, _ combo: String, press: Bool = true) -> MenuShortcut {
     let parts = combo.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map(String.init)
-    guard let key = parts.last, key.count == 1, parts.contains(where: { ["cmd", "command", "meta", "super"].contains($0) }) else { return false }
+    guard let key = parts.last, key.count == 1, parts.contains(where: { ["cmd", "command", "meta", "super"].contains($0) }) else { return .notFound }
     let shift = parts.contains("shift"), opt = parts.contains { ["opt", "option", "alt"].contains($0) }, ctrl = parts.contains { ["ctrl", "control"].contains($0) }
     let want = (shift ? 1 : 0) | (opt ? 2 : 0) | (ctrl ? 4 : 0)
-    guard let bar = attr(app, kAXMenuBarAttribute) else { return false }
+    guard let bar = attr(app, kAXMenuBarAttribute) else { return .notFound }
     var stack: [(AXUIElement, Int)] = [(bar as! AXUIElement, 0)]
-    var visited = 0
+    var visited = 0, greyed = false
     while let (el, d) = stack.popLast(), visited < 3000 {
         visited += 1
         let a = attrs(el, ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", kAXEnabledAttribute, kAXChildrenAttribute])
-        if let ch = a[0] as? String, ch.lowercased() == key, let mods = (a[1] as? NSNumber)?.intValue, mods & 8 == 0, mods & 7 == want, (a[2] as? Bool) != false {
-            return AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
+        if let ch = a[0] as? String, ch.lowercased() == key, let mods = (a[1] as? NSNumber)?.intValue, mods & 8 == 0, mods & 7 == want {
+            if (a[2] as? Bool) == false { greyed = true }
+            // A press that fails counts as not found, so the key is sent to the app as before.
+            else { return !press || AXUIElementPerformAction(el, kAXPressAction as CFString) == .success ? .pressed : .notFound }
         }
         if d < 4, let kids = a[3] as? [AXUIElement] { for k in kids { stack.append((k, d + 1)) } }
     }
-    return false
+    return greyed ? .greyedOut : .notFound
 }
 func typeText(_ s: String) {
     for chunk in Array(s.utf16).chunked(16) {
@@ -1446,6 +1486,30 @@ case "--self-test":
     let strokes = canvas(80, 40, [CGRect(x: 20, y: 10, width: 6, height: 20), CGRect(x: 28, y: 10, width: 6, height: 20)])
     check("an icon's strokes join", fitBox(strokes, 80, 40, CGRect(x: 18, y: 8, width: 18, height: 24), join: 3) == CGRect(x: 20, y: 10, width: 14, height: 20))
     check("a letter-sized guess keeps neighbours apart", fitBox(strokes, 80, 40, CGRect(x: 19, y: 9, width: 8, height: 22), join: 0) == CGRect(x: 20, y: 10, width: 6, height: 20))
+    // Regression: Cmd+W to TextEdit behind another app was logged as pressed but did nothing (Close is greyed out there).
+    check("an enabled menu item is pressed in place", shortcutRoute(item: .pressed, appInFront: false, trustMenu: true) == .menu)
+    check("a greyed-out item behind another app gets the real key", shortcutRoute(item: .greyedOut, appInFront: false, trustMenu: true) == .realKeyboard)
+    check("a shortcut with no menu item is sent to the app", shortcutRoute(item: .notFound, appInFront: false, trustMenu: true) == .sendKey)
+    check("with the app in front the key is just pressed", shortcutRoute(item: .greyedOut, appInFront: true, trustMenu: true) == .sendKey)
+    check("menus not trusted behind: the real key, not the menu", shortcutRoute(item: .pressed, appInFront: false, trustMenu: false) == .realKeyboard)
+    // Regression: a borrowed Cmd+W was pressed whether or not its app had come forward, so it could land in another app.
+    check("a borrowed key goes ahead with its app in front", borrowVerdict(target: "TextEdit", targetPid: 7, frontPid: 7, frontName: "TextEdit") == nil)
+    check("another app in front stops it, by name", borrowVerdict(target: "TextEdit", targetPid: 7, frontPid: 9, frontName: "Ghostty") == "Ghostty is in front instead of TextEdit, so I stopped before pressing keys in the wrong app.")
+    check("no app known in front stops it too", borrowVerdict(target: "TextEdit", targetPid: 7, frontPid: nil, frontName: nil) == "another app is in front instead of TextEdit, so I stopped before pressing keys in the wrong app.")
+    // Regression: click_text "Delete" searched the window the plan started on, not the document it had opened since.
+    let pw = { (id: Int, pid: pid_t) in Win(id: id, pid: pid, app: "App", title: "w\(id)", x: 0, y: 0, w: 600, h: 400) }
+    check("a window in front of the plan's window is searched", newerWindows([pw(5, 1), pw(2, 1)], pinned: pw(2, 1)).map { $0.id } == [5])
+    check("windows behind the plan's window are not", newerWindows([pw(2, 1), pw(1, 1)], pinned: pw(2, 1)).isEmpty)
+    check("another app's window in front is not", newerWindows([pw(9, 7), pw(5, 1), pw(2, 1)], pinned: pw(2, 1)).map { $0.id } == [5])
+    check("the plan's window gone: that app's windows", newerWindows([pw(9, 7), pw(5, 1), pw(4, 1)], pinned: pw(2, 1)).map { $0.id } == [5, 4])
+    check("at most 3, front first", newerWindows([pw(8, 1), pw(7, 1), pw(6, 1), pw(5, 1), pw(2, 1)], pinned: pw(2, 1)).map { $0.id } == [8, 7, 6])
+    // Regression: the plan's window had closed, and click_text "Delete" still looked inside its old rectangle, so it
+    // picked the dialog's sentence containing "delete" over the Delete button beside it.
+    let moved = Win(id: 2, pid: 1, app: "App", title: "w2", x: 40, y: 60, w: 600, h: 400)
+    check("the plan's window still open: as it is now", currentWindow([pw(5, 1), moved], pinned: pw(2, 1)).map { [$0.id, Int($0.x), Int($0.y)] } == [2, 40, 60])
+    check("the plan's window gone: that app's front window", currentWindow([pw(9, 7), pw(5, 1), pw(4, 1)], pinned: pw(2, 1))?.id == 5)
+    check("the plan's window gone and none left: nothing", currentWindow([], pinned: pw(2, 1)) == nil)
+    check("another app's windows are never taken", currentWindow([pw(9, 7), pw(8, 7)], pinned: pw(2, 1)) == nil)
     exit(bad == 0 ? 0 : 1)
 
 case "trusted":
@@ -1625,7 +1689,8 @@ case "act":
           let plan = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let steps = plan["steps"] as? [[String: Any]] else { fail("bad plan") }
     let target = (plan["window"] as? Int).map { "window:\($0)" } ?? (plan["app"] as? String).map { "app:\($0)" } ?? "front"
-    guard let w = resolve(target) else { fail("No matching window is open.") }
+    guard var w = resolve(target) else { fail("No matching window is open.") }
+    var switched = false
     if let name = handsOff(w.pid) {
         fail("Blocked for safety: I can point at things in \(name), but I never type or click in it. Show the user where to click instead.")
     }
@@ -1676,11 +1741,20 @@ case "act":
         let what = s["do"] as? String ?? ""
         usedRealCursor = false
         userBusy = false
+        wrongFront = nil
         defer { if usedRealCursor, !done.isEmpty { done[done.count - 1] += " (needed the real cursor)" } }
         defer {
             if userBusy {
                 out(["ok": false, "error": "Step \(i + 1) needs the real mouse, but the user was typing or using the mouse, so I didn't take over (their keys would have gone into \(w.app)). Nothing after it ran. Tell them, and offer to finish when they're free.", "done": done])
             }
+        }
+        defer { if let why = wrongFront { out(["ok": false, "error": "Step \(i + 1): \(why)", "done": done]) } }
+        // Earlier steps may have moved the plan's window, or closed it and opened another (cmd+n over an Open panel).
+        // Text was looked for inside the old window's rectangle, so a dialog's sentence won over its Delete button.
+        if what != "wait", let cur = currentWindow(windows(), pinned: w) {
+            let moved = cur.id != w.id
+            w = cur; bgWin = cur
+            if moved { switched = true; controls = walk(app, w) }
         }
         if earlyWaits.contains(i + 1) { sigBefore = pageSig() }
         // A click at a spot only vouches for the typing that follows it (keys like cmd+a and waits in between are fine);
@@ -1734,6 +1808,7 @@ case "act":
             // A whole label or heading, not words buried in a paragraph.
             let q = s["text"] as? String ?? ""
             var hit: (AXUIElement, [String: Any])?
+            var opened = ""
             // A checkbox or radio by its label: press the control itself; clicking the words doesn't always tick it.
             // Browser tabs are radio buttons too (a tab titled "Sign in"), so a box inside the web page comes first, and
             // one outside it only when the words aren't found in the page.
@@ -1755,6 +1830,14 @@ case "act":
                 hit = findTextEls(app, w, q).first(where: { clickMatch($0.1) })
                 if let box = boxes.first, hit == nil || !inWebPage(hit!.0) { hit = (box.0, ["text": box.1["label"] ?? q]) }
                 if hit == nil, !q.isEmpty, scrollToText(app, w, q) { hit = findTextEls(app, w, q).first(where: { clickMatch($0.1) }) }
+                // Not in the plan's window: an earlier step may have opened a new one (cmd+n, a dialog). Look there.
+                if hit == nil, !q.isEmpty {
+                    for nw in newerWindows(windows(), pinned: w) {
+                        guard let h = findTextEls(app, nw, q).first(where: { clickMatch($0.1) }) else { continue }
+                        hit = h; w = nw; bgWin = nw; switched = true; opened = nw.title.isEmpty ? " (in the window that opened)" : " (in the window that opened: \(nw.title))"
+                        break
+                    }
+                }
             }
             guard !q.isEmpty, let (e, info) = hit else {
                 out(["ok": false, "error": "Step \(i + 1): no visible text \"\(s["text"] ?? "")\" in \(w.app). Check the exact words with a screenshot or read_window.", "done": done])
@@ -1771,7 +1854,7 @@ case "act":
                 }
                 click(p)
             }
-            done.append("clicked \"\(info["text"] ?? q)\"")
+            done.append("clicked \"\(info["text"] ?? q)\"\(opened)")
             Thread.sleep(forTimeInterval: 0.15)
             controls = walk(app, w)
         case "type":
@@ -1828,7 +1911,7 @@ case "act":
             let busy = (ok: false, shows: "")
             var r = inBackground && isDate ? withRealCursor { typeInto(app, e, text) } ?? busy : typeInto(app, e, text)
             if inBackground, !userBusy, !took(r) { r = withRealCursor { typeInto(app, e, text) } ?? busy }
-            if userBusy { break }
+            if userBusy || wrongFront != nil { break }
             if !r.ok { out(["ok": false, "error": "Step \(i + 1): couldn't put the cursor in \"\(label)\", so nothing was typed.", "done": done]) }
             let shows = r.shows.trimmingCharacters(in: .whitespacesAndNewlines)
             // Password fields show dots: the right number of them is a match. (They're secure fields, so the check
@@ -1885,6 +1968,7 @@ case "act":
                     typeText(option); Thread.sleep(forTimeInterval: 0.35); _ = pressKey("return")
                 } else {
                     _ = pressKey("escape")
+                    if let why = wrongFront { out(["ok": false, "error": "Step \(i + 1): \(why)", "done": done]) }
                     out(["ok": false, "error": "Step \(i + 1): opened \"\(label)\" but no option \"\(option)\" showed up. Take a screenshot to see the choices.", "done": done])
                 }
             }
@@ -1947,9 +2031,20 @@ case "act":
             // Cmd+S in the background: its menu item is greyed out while the app is behind, so ask the app to save
             // its front document directly (no dialog for one that already has a file; a new one still needs the cursor).
             if inBackground, ["cmd+s", "command+s"].contains(combo), saveInBackground(w) { done.append("pressed \(s["key"]!) (saved)"); break }
-            if inBackground, ["cmd+s", "command+s"].contains(combo) { _ = withRealCursor { pressKey(combo) }; done.append("pressed \(s["key"]!)"); break }
-            if inBackground, pressMenuShortcut(app, s["key"] as? String ?? "") { done.append("pressed \(s["key"]!)"); break }
-            guard pressKey(s["key"] as? String ?? "") else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "")", "done": done]) }
+            if inBackground, ["cmd+s", "command+s"].contains(combo) { if withRealCursor({ pressKey(combo) }) != nil { done.append("pressed \(s["key"]!)") }; break }
+            let keyName = s["key"] as? String ?? ""
+            let item = inBackground ? pressMenuShortcut(app, keyName, press: MENU_WORKS_BEHIND) : MenuShortcut.notFound
+            var sent: Bool? = true
+            switch shortcutRoute(item: item, appInFront: !inBackground, trustMenu: MENU_WORKS_BEHIND) {
+            case .menu: break
+            // Not raising the plan's window: the key goes to the window the app has in front, as it would with the app
+            // in front. Raised, Cmd+W after Cmd+N closed the window the plan started on instead of the new document.
+            case .realKeyboard: sent = withRealCursor(raise: false) { pressKey(keyName) }
+            case .sendKey: sent = pressKey(keyName)
+            }
+            // nil: the user was busy, so the key was never pressed (the step ends with that error).
+            guard let sent else { break }
+            guard sent else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "")", "done": done]) }
             done.append("pressed \(s["key"]!)")
         case "click_at":
             // Points relative to the window's top-left, or global screen points when "global" is set.
@@ -1981,7 +2076,8 @@ case "act":
     // A click or key may have changed the page: hand back what's there now, so no read_window round trip is needed.
     let changing = steps.contains { ["click", "click_text", "press_button", "key", "click_at", "fill", "choose", "scroll", "set"].contains($0["do"] as? String ?? "") }
     if changing {
-        let w2 = resolve(target) ?? w
+        // After a switch to a window the plan opened, show that one while it is still open.
+        let w2 = (switched ? windows().first { $0.id == w.id } : nil) ?? resolve(target) ?? w
         let app2 = w2.pid == w.pid ? app : axApp(w2)
         let now = settle(app2, w2).map { $0.1 }
         out(["ok": true, "done": done, "window": winInfo(w2), "controls": now, "texts": pageText(app2, w2, cap: 2000)])

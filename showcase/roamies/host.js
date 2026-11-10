@@ -52,8 +52,9 @@
   const focusField = () => { typing(true); setTimeout(() => field.focus(), 30); ask?.h.focus(true); };
   const finishAsk = (text) => {
     if (!ask) return;
-    const { id, h } = ask;
+    const { id, h, label } = ask;
     ask = null;
+    if (label != null) field.setAttribute('aria-label', label);
     field.blur(); field.value = '';
     typing(false);
     h.close();
@@ -67,17 +68,34 @@
     field.value = '';
     field.type = m.mask ? 'password' : 'text';
     // The question goes in the placeholder, so the bubble reads "Paste your API key…" until you type.
-    const h = a.prompt({ placeholder: m.prompt || m.placeholder || '', mask: m.mask, onPress: focusField });
-    ask = { id: m.id, h };
+    const question = m.prompt || m.placeholder || '';
+    // A yes/no: Allow answers yes, any other button no. The field only takes keys then (Y, N, Tab, arrows, Enter).
+    const choices = Array.isArray(m.choices) && m.choices.length ? m.choices.map(String) : null;
+    const h = a.prompt({ placeholder: question, mask: m.mask, onPress: focusField, choices, onChoose: (i) => finishAsk(i === 0 ? 'yes' : null) });
+    ask = { id: m.id, h, choices, sel: -1, label: null };
+    if (choices) { ask.label = field.getAttribute('aria-label'); field.setAttribute('aria-label', `${question} Press Y to allow or N to decline.`); }
     focusField();
   };
   // The bubble draws the caret where the field has it, so moving back to fix a word shows where typing goes.
-  const syncField = () => ask?.h.set(field.value, field.selectionDirection === 'backward' ? field.selectionStart : field.selectionEnd);
+  const syncField = () => !ask?.choices && ask?.h.set(field.value, field.selectionDirection === 'backward' ? field.selectionStart : field.selectionEnd);
   field.addEventListener('input', syncField);
   field.addEventListener('select', syncField);
   field.addEventListener('keyup', syncField);
   field.addEventListener('keydown', (e) => {
     if (!ask) return;
+    if (ask.choices) {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      e.preventDefault();
+      const n = ask.choices.length, key = e.key.toLowerCase();
+      if (key === 'y') finishAsk('yes');
+      else if (key === 'n' || key === 'escape') finishAsk(null);
+      else if (key === 'tab' || key === 'arrowright' || key === 'arrowleft') {
+        const back = key === 'arrowleft' || (key === 'tab' && e.shiftKey);
+        ask.sel = ask.sel < 0 ? (back ? n - 1 : 0) : (ask.sel + (back ? n - 1 : 1)) % n;
+        ask.h.select(ask.sel);
+      } else if ((key === 'enter' || key === ' ') && ask.sel >= 0) finishAsk(ask.sel === 0 ? 'yes' : null);
+      return;
+    }
     setTimeout(syncField, 0); // arrows, Home and End move the caret without an input event
     if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finishAsk(field.value); }
     else if (e.key === 'Escape') { e.preventDefault(); finishAsk(null); }
@@ -88,6 +106,7 @@
   let speech = null, thought = null, nextMood = null, listen = null, heard = null, responding = false;
   // waveTurn: a spoken question whose "thinking" shows as dots beside the cursor (macOS), so the Sidekick
   // shows no thought cloud of its own. research: this turn's answer broke down into points, so it goes on the card.
+  let hearing = false; // a voice take is open (the mic is on), so Esc can cancel it
   let waveTurn = false, research = false, heardText = false, spoken = '', fromWeb = false;
   // An answer that turns into points (or cites sources) reads better on the card than in a bubble.
   const LISTY = /\n\s*(?:[-*•]|\d+[.)])\s+\S|\n\s*sources?\s*:/i;
@@ -103,6 +122,25 @@
   let current = null;
   const MOODS = { hype: 'happy', wave: 'happy', upset: 'annoyed', remind: 'concerned', motivate: 'determined' };
   const endTalk = () => { speech?.end(); thought?.end(); speech = thought = null; };
+  // Auto-listen: a spoken question answered with a question. Once the bubble has typed it out and the voice has said
+  // it, and a short pause, the mic opens hands-free. Anything the user does first drops it.
+  let autoListen = null;
+  const dropAutoListen = () => { if (autoListen) { clearInterval(autoListen.t); autoListen = null; } };
+  function waitThenListen(l) {
+    dropAutoListen();
+    const t0 = Date.now(), me = { quietAt: 0 };
+    me.t = setInterval(() => {
+      if (autoListen !== me) return;
+      if (Date.now() - t0 > 90_000 || ask) return dropAutoListen();
+      const done = !getAgent()?.typing() && (Roamie.voiceOut ? Roamie.voiceOut.finished(l.speech) : true);
+      if (!done) { me.quietAt = 0; return; }
+      me.quietAt ||= Date.now();
+      if (Date.now() - me.quietAt < 400) return;
+      dropAutoListen();
+      send({ type: 'auto_listen', turn: l.turn });
+    }, 100);
+    autoListen = me;
+  }
 
   async function playTools() {
     if (current) return;
@@ -147,9 +185,12 @@
     if (!a) return;
     switch (e.type) {
       case 'start':
+        dropAutoListen();
         // A new request: no tool of an earlier one is still running, whatever was missed (a cut-off call). Its tag
         // ends instead of staying up, with this request's tags queued behind it.
         for (const j of [current, ...jobs]) if (j && j.result === undefined) { j.result = false; j.h?.done(true); }
+        // Nor is it still working in another app, even if that work's end was missed.
+        a.hand?.end();
         responding = true;
         heard = null;
         research = false; fromWeb = false; spoken = '';
@@ -242,8 +283,10 @@
         if (research) panel()?.end(fromWeb ? 'From the web' : 'Answer');
         research = waveTurn = false;
         endTalk();
+        if (e.listen) waitThenListen(e.listen);
         break;
       case 'error':
+        dropAutoListen();
         responding = false;
         if (research) panel()?.fail(e.message);
         research = waveTurn = false;
@@ -260,7 +303,10 @@
     if (m.type === 'ink') { Roamie.pen?.(m); return; }
     const a = getAgent();
     if (!a) return;
+    if ((m.type === 'state' && m.state !== 'listening') || m.type === 'final') hearing = false;
     if (m.type === 'state' && m.state === 'listening') {
+      hearing = true;
+      dropAutoListen();
       if (ask) finishAsk(null);
       endTalk();
       heard = null;
@@ -301,6 +347,7 @@
     for (const m of q) window.__roamieHost(m);
   };
   window.__roamieMoved = () => {
+    dropAutoListen();
     const a = getAgent();
     if (ask) finishAsk(null);
     endTalk(); listen?.close(); listen = null;
@@ -322,7 +369,18 @@
       return;
     }
     if (!getAgent()) return;
-    if (m.kind === 'hands') { handsBusy = !!m.on; if (handsBusy) setHot(false); return; }
+    if (m.kind === 'hands') {
+      // on/off: it is acting in another app. In between: where each step lands (global screen points) and when a
+      // step takes the real cursor; the Sidekick hops there in its cursor form instead of chasing the cursor.
+      const hand = getAgent().hand;
+      if (m.step) {
+        const [x, y, w, h] = m.step.bounds, o = Roamie.origin ?? { x: 0, y: 0 }, px = x + w / 2 - o.x, py = y + h / 2 - o.y;
+        // A spot on another display isn't this overlay's to show.
+        if (px >= 0 && py >= 0 && px <= innerWidth && py <= innerHeight) { hand?.begin(); hand?.at(px, py); }
+      } else if (m.borrow) hand?.begin();
+      else { handsBusy = !!m.on; if (handsBusy) setHot(false); else hand?.end(); }
+      return;
+    }
     if (m.kind === 'greet') { getAgent().act('wave'); return; }
     if (m.kind === 'intro') { getAgent().intro(m.x, m.text); return; }
     if (m.kind === 'esc') { onEsc(); return; }
@@ -344,13 +402,17 @@
   // ---------- Esc ----------
   // While it's on screen, Esc stops an answer (and the voice), or sends it away when it's idle. The shell holds a
   // global Esc only meanwhile (other apps don't get Esc while it does), so this overlay says when it's up.
-  // A drawing counts only while it plays: cards left on screen have their own close button and don't hold Esc. The
+  // A drawing counts while it plays and while its marks are still on the screen (frames, loops: Esc is their only
+  // way out once the Roamie has gone). Cards left on screen have their own close button and don't hold Esc. The
   // reminders card does while it shows (it goes by itself in a few seconds).
-  const up = () => !!(getAgent()?.visible || ask || Roamie.panel?.isOpen || Roamie.ink?.playing || Roamie.ink?.reminding);
+  // A voice turn counts too: on macOS the sidekick steps away while the mic is on and until the answer shows.
+  const up = () => !!(getAgent()?.visible || ask || Roamie.panel?.isOpen || Roamie.ink?.playing || Roamie.ink?.loose || Roamie.ink?.reminding || hearing || waveTurn || Roamie.voiceOut?.playing());
   function onEsc() {
+    dropAutoListen();
     const a = getAgent();
     if (!a || !up()) return;
     if (ask) { finishAsk(null); return; }
+    if (hearing) { hearing = false; send({ type: 'listen_cancel' }); return; }
     if (responding || Roamie.voiceOut?.playing()) { send({ type: 'menu', id: 'stop' }); Roamie.voiceOut?.stop(); return; }
     // A drawing on screen: Esc takes it all away (and the sidecar forgets its parts).
     if (Roamie.ink?.busy) { Roamie.ink.clear({ all: true }); send({ type: 'ink_cleared' }); return; }

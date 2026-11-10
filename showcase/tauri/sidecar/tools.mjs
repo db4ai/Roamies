@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isRiskyClick, isYes } from './safety.mjs';
+import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isRiskyClick, isYes, riskyKind } from './safety.mjs';
 import dns from 'node:dns/promises';
 import { CARDS, DrawArgs, checkDraw, createParts, faviconFor, photoFor, pickTextMatch, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
@@ -17,7 +17,16 @@ const HOME = os.homedir();
 export const expand = (p) => path.resolve(String(p).replace(/^~(?=$|\/|\\)/, HOME));
 const clip = (s, n) => (s.length > n ? s.slice(0, n) + `\n…(${s.length - n} more characters)` : s);
 // windowsHide: no console window flashing up for each command or screenshot on Windows.
-export const run = (cmd, args, opts = {}) => new Promise((res) => execFile(cmd, args, { maxBuffer: 8 << 20, timeout: 60_000, windowsHide: true, ...opts }, (err, stdout, stderr) => res({ err, stdout: String(stdout), stderr: String(stderr) })));
+// onLine: called with each line of stderr as it arrives (the hands helper's live progress).
+export const run = (cmd, args, { onLine, ...opts } = {}) => new Promise((res) => {
+  const child = execFile(cmd, args, { maxBuffer: 8 << 20, timeout: 60_000, windowsHide: true, ...opts }, (err, stdout, stderr) => res({ err, stdout: String(stdout), stderr: String(stderr) }));
+  if (!onLine || !child.stderr) return;
+  let buf = '';
+  child.stderr.on('data', (d) => {
+    buf += d;
+    for (let k; (k = buf.indexOf('\n')) >= 0; buf = buf.slice(k + 1)) { try { onLine(buf.slice(0, k)); } catch { /* a listener's fault never fails the command */ } }
+  });
+});
 // Windows "open": Start-Process gets the target (and the app to open it in) through environment variables, so
 // nothing in them is ever parsed as a command (cmd's start split URLs at "&", and quotes in names broke it). A
 // failure says "Unable to find application", as macOS's open does.
@@ -114,6 +123,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
   // Bumped for every new request: what was seen before it may be another page, tab or app by now.
   let turn = 0;
+  // Risky clicks the user allowed this request, as "app|kind": one Allow covers that kind in that app until the next request.
+  let allowedClicks = { turn: -1, keys: new Set() };
   async function shotPoint(x, y) {
     const problem = shotProblem(lastShot, turn);
     if (problem) throw new Error(problem);
@@ -141,8 +152,16 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     // its bubble sits on the spot being clicked.
     const acting = args[0] === 'act';
     if (acting) ui({ kind: 'hands', on: true });
+    // While it acts, the Sidekick hops to where each step lands. Only the spot is passed on, never what is typed.
+    const onLine = acting ? (line) => {
+      if (line[0] !== '@') return;
+      let ev;
+      try { ev = JSON.parse(line.slice(1)); } catch { return; }
+      if (ev.ev === 'borrow') ui({ kind: 'hands', borrow: true });
+      else if (ev.ev === 'step' && Array.isArray(ev.bounds) && ev.bounds.length === 4 && ev.bounds.every(Number.isFinite)) ui({ kind: 'hands', step: { bounds: ev.bounds } });
+    } : undefined;
     let r;
-    try { r = await runHands(args, { timeout: 120_000 }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
+    try { r = await runHands(args, { timeout: 120_000, onLine }); } finally { if (acting) ui({ kind: 'hands', on: false }); }
     let res;
     try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`); }
     if (res.ok === false && !res.cancelled) {
@@ -170,7 +189,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
   async function confirm(question, ctx) {
-    const answer = await ask({ placeholder: question }, ctx?.signal);
+    const answer = await ask({ placeholder: question, choices: ['Allow', "Don't allow"] }, ctx?.signal);
     return isYes(answer);
   }
 
@@ -320,7 +339,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   });
   // How each kind of place is found. retry: just after a click, when a menu or dialog may still be opening.
   function lookups(spec, retry) {
-    let live = null, shotOk = null, controls = null, fitQueue = null;
+    let live = null, shotOk = null, controls = null, fitQueue = null, wins = null;
     // The same words marked twice in a segment (a ring and a connect to it): one helper round trip.
     const seen = new Map();
     return {
@@ -390,6 +409,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         if (!HANDS || spec === 'screen') return null;
         controls ??= hands('ui', spec, 'controls').then((r) => (r.controls ?? []).filter((c) => !c.offscreen && c.bounds).map((c) => c.bounds), () => []);
         return snapRect(rect, await controls);
+      },
+      // The open windows' boxes, front to back (once per segment), for frames drawn round a whole window.
+      windows() {
+        if (!HANDS) return Promise.resolve([]);
+        wins ??= hands('windows').then((r) => (r.windows ?? []).map((w) => w.bounds).filter(Array.isArray), () => []);
+        return wins;
       },
       // The screenshot is checked once per segment (not for every point of a traced outline).
       async pixel(x, y) {
@@ -618,11 +643,23 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
             else mapped.push(s);
           }
           // Delete, pay, send, sign out: ask first, whatever the request was. The helper refuses these clicks without it.
+          if (allowedClicks.turn !== turn) allowedClicks = { turn, keys: new Set() };
+          const appName = sameApp && lastRead.app ? lastRead.app : asked;
+          const inThisPlan = new Set(); // one plan acts in one window, so its own steps share an Allow even when the app isn't known yet
           for (const s of mapped) {
             const label = s.do === 'click_text' ? s.text : s.do === 'click' ? s.label : s.do === 'choose' ? s.option : null;
             if (label && isRiskyClick(label)) {
-              if (!(await confirm(`Click "${label}"${asked === 'front' ? '' : ` in ${asked}`}? It could delete, pay, send or sign out. Type y to let me.`, ctx))) {
-                throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
+              const kind = riskyKind(label);
+              // "front" or "browser" could be a different app by the next call, so those aren't remembered past this plan.
+              const key = /^(front|browser)$/i.test(appName) ? null : `${appName.toLowerCase()}|${kind}`;
+              if (!inThisPlan.has(kind) && !(key && allowedClicks.keys.has(key))) {
+                const where = appName === 'front' ? '' : ` in ${appName}`;
+                const covers = key ? ` Allow covers every "${kind}" click there for the rest of this request.` : '';
+                if (!(await confirm(`Click "${label}"${where}? It could delete, pay, send or sign out.${covers}`, ctx))) {
+                  throw new Error(`${userName} said no, so I didn't click "${label}" (nothing after it ran either).`);
+                }
+                inThisPlan.add(kind);
+                if (key) allowedClicks.keys.add(key);
               }
               s.confirmed = true;
             }
@@ -699,7 +736,7 @@ A drawing stays until the user clears it or the window changes; your next drawin
         const exists = await fs.stat(expand(p)).then(() => true, () => false);
         const v = checkWrite(p, HOME, { exists });
         const f = allowed(v);
-        if (v.level === ASK && !(await confirm(`${v.reason} Type y to let me.`, ctx))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
+        if (v.level === ASK && !(await confirm(v.reason, ctx))) throw new Error(`${userName} said no, so I didn't write ${p}.`);
         await fs.mkdir(path.dirname(f), { recursive: true });
         await fs.writeFile(f, content);
         return `Wrote ${content.length} characters to ${f}.`;
@@ -712,7 +749,7 @@ A drawing stays until the user clears it or the window changes; your next drawin
         if (!allowActions()) throw new Error(actionsOff);
         const v = classifyCommand(command, HOME, { exists: existsSync });
         if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason} Don't try to get around this; tell ${userName} what you wanted to do instead.`);
-        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''} Type y to run it.`, ctx))) {
+        if (v.level === ASK && !(await confirm(`Run \`${command.length > 70 ? command.slice(0, 67) + '…' : command}\`?${v.reason ? ' ' + v.reason : ''}`, ctx))) {
           throw new Error(`${userName} said no, so the command didn't run.`);
         }
         const shell = process.platform === 'win32' ? ['cmd', ['/c', command]] : [process.env.SHELL || '/bin/zsh', ['-lc', command]];

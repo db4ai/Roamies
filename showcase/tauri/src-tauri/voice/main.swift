@@ -339,6 +339,7 @@ final class Voice {
     // A release must last this long to count, so one glitchy frame of key state can't end a session.
     private static let releaseDebounce = 0.09
     private static let pauseEnds = 1.5
+    private static let wordsEnd = 2.5 // hands-free: no new words for this long ends it, even with background sound
     private static let maxSession = 60.0
 
     var engineName: String { useAnalyzer ? "speechanalyzer" : "sfspeech" }
@@ -412,7 +413,8 @@ final class Voice {
             // Pressing again switches to push-to-talk; letting go then sends.
             if chord && !prevChord && !blocked { phase = .holding; releasedAt = nil; return }
             let quiet = now - max(heardAt, voiceAt)
-            if !best.isEmpty && quiet > Self.pauseEnds { end("pause"); finish() }
+            // Steady sound in the room (a fan, music) keeps the level up, so words that stopped coming end it too.
+            if !best.isEmpty && (quiet > Self.pauseEnds || now - heardAt > Self.wordsEnd) { end(quiet > Self.pauseEnds ? "pause" : "no new words"); finish() }
             else if best.isEmpty && now - listenAt > 8 { end("nothing heard"); cancel() }
             else if now - listenAt > Self.maxSession { end("max length"); finish() }
         case .finishing:

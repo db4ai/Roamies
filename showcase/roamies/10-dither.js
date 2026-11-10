@@ -379,11 +379,36 @@
           } else { p.state = 'hidden'; parts.length = 0; }
         }
       };
+      // Blink: its screen switches off, mid() runs while nothing is drawn (it is moved somewhere else) and it switches
+      // back on there, so it hops between the spots it works on in another app without crossing the screen. The CRT
+      // picture of show and hide, quicker. A straight cut under reduced motion, or when it isn't fully shown.
+      const BLINK = { out: 0.16, in: 0.2 };
+      let bl = null;
+      const blinkMid = () => {
+        const x0 = m.x, y0 = m.y;
+        bl.mid?.();
+        // What trails the body arrives with it, instead of stretching over from where it was.
+        const dx = m.x - x0, dy = m.y - y0;
+        for (const q of [...tail, ...hands, ...ears, ...(ant ?? [])]) { q.x += dx; q.y += dy; }
+      };
+      const blinkCut = () => { if (!bl) return; if (bl.dir === 'out') blinkMid(); const r = bl.res; bl = null; r(); };
+      const blink = (mid) => new Promise((res) => {
+        blinkCut(); // one at a time: a hop still playing lands first
+        bl = { dir: 'out', u: 0, mid, res };
+        if (lastEnv?.reduced || pres.state !== 'shown') blinkCut();
+      });
+      const blinkStep = (dt) => {
+        if (!bl) return;
+        if (pres.state !== 'shown') { blinkCut(); return; }
+        bl.u = Math.min(1, bl.u + dt / BLINK[bl.dir]);
+        if (bl.u < 1) return;
+        if (bl.dir === 'out') { blinkMid(); bl.dir = 'in'; bl.u = 0; } else blinkCut();
+      };
       // CRT: scale the finished frame around the body; returns null when not playing.
       const crtXform = () => {
-        if (pres.v !== 'crt' || (pres.state !== 'in' && pres.state !== 'out')) return null;
-        const u = pres.u;
-        if (pres.state === 'in') {
+        if (!bl && (pres.v !== 'crt' || (pres.state !== 'in' && pres.state !== 'out'))) return null;
+        const u = bl ? bl.u : pres.u;
+        if ((bl ? bl.dir : pres.state) === 'in') {
           if (u < 0.28) { const a = smooth(u / 0.28); return { sx: a * 1.25, sy: 0.03, line: 1, flash: 1, dot: 0 }; }
           if (u < 0.75) { const b = smooth((u - 0.28) / 0.47); return { sx: 1.25 - 0.29 * b, sy: 0.03 + 1.11 * b, line: 1 - b, flash: 1 - b * 0.7, dot: 0 }; }
           const c = smooth((u - 0.75) / 0.25); return { sx: 0.96 + 0.04 * c, sy: 1.14 - 0.14 * c, line: 0, flash: 0.3 * (1 - c), dot: 0 };
@@ -511,6 +536,7 @@
         appear, vanish,
         stopAct: () => { if (act) { act = null; nextAct = rand(3, 6); } },
         get morphing() { return !!mo; },
+        blink: (mid) => blink(mid),
         get presence() { return pres.state; }, get presU() { return pres.u; }, get form() { return form; },
         get look() { return look; },
         // From the cursor form's arrow tip to the body point (the pen draws with the tip), and the size the user picked.
@@ -520,7 +546,7 @@
       };
       // Nothing moving on the body itself (no act, particles, squash or strong expression): a still picture of it
       // is all of it, so something else can draw it (the native follower, buddy.swift).
-      kit.calmBody = () => pres.state === 'shown' && !act && !pending && !parts.length && !drips.length && Math.abs(sq.x) < 0.04
+      kit.calmBody = () => pres.state === 'shown' && !bl && !act && !pending && !parts.length && !drips.length && Math.abs(sq.x) < 0.04
         && face.happy < 0.3 && face.wide < 0.3 && face.dizzy < 0.3 && face.sleepy < 0.3 && !m.dragging && !m.flung;
       // The body as drawn right now, eyes open and shut: PNG (base64) at the screen's scale, its size in CSS px and
       // where the body point (m.x, m.y) is in it.
@@ -580,12 +606,13 @@
         update(dt, env) {
           t += dt; jst.dt = dt;
           EW = env.w; EH = env.h;
-          if (pres.state === 'hidden') { plug?.update?.(dt, env); return; }
+          if (pres.state === 'hidden') { blinkCut(); plug?.update?.(dt, env); return; }
           const performing = pres.state === 'in' || pres.state === 'out';
           // Popping up beside the cursor: the agent layer keeps it moving with the cursor during the entrance.
           if (performing && pres.state === 'in' && pres.v !== 'drop' && m.drive) { m.drive(dt, env); pres.tx = m.x; pres.ty = m.y; }
           if (performing) presStep(dt); else m.update(dt, env);
           morphStep(dt);
+          blinkStep(dt);
           sq.update(dt);
           let px = m.x, py = m.y;
           tail.forEach((s, i) => { spring(s, px, py, 70 - i * 14, 8, dt); px = s.x; py = s.y; });

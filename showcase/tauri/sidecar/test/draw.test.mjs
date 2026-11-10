@@ -1,6 +1,6 @@
 // The draw tool's schema, places, parts, SMILES and picture fetching. Run: npm test
 import assert from 'node:assert/strict';
-import { DrawArgs, LIMITS, checkDraw, createParts, describeParts, faviconFor, parseSmiles, photoFor, resolveTargets, shapeRadius } from '../draw.mjs';
+import { DrawArgs, LIMITS, checkDraw, createParts, describeParts, faviconFor, fitWindow, parseSmiles, photoFor, resolveTargets, shapeRadius, windowSized } from '../draw.mjs';
 
 // ---- schema and limits
 const ok = (a) => DrawArgs.safeParse(a).success;
@@ -92,6 +92,46 @@ console.log('shape radius tests: passed');
   assert.deepEqual(s7.marks.map((m) => m.at.rect), [[12, 50, 7, 9]], 'within alone: the one in that area');
   assert.ok(DrawArgs.safeParse({ beats: [{ say: 'x', marks: [{ kind: 'ring', at: { text: 's', every: true } }] }] }).success, 'every is in the schema');
   console.log('draw target tests: passed');
+}
+
+// ---- frames round whole windows
+{
+  // Regression: "point to each window" on a 3×2 grid of 600×533-point windows. The model's boxes (pixels of a
+  // 1568×1018 screenshot of an 1800-point-wide screen) were right, but each was refitted to "what's drawn there",
+  // which joined the neighbouring windows in: the helper gave back boxes 900 to 1300 points wide.
+  const grid = [[600, 572, 600, 533], [1200, 572, 600, 533], [600, 39, 600, 533], [0, 572, 600, 533], [1200, 39, 600, 533], [0, 39, 600, 533]];
+  const S = 1800 / 1568, refits = [];
+  const look = {
+    pixel: async (x, y) => [Math.round(x * S), Math.round(y * S)],
+    refine: async (r) => { refits.push(r); return r[2] > 200 ? [0, 0, 923.8, 654.4] : [20, 50, 30, 30]; },
+    windows: async () => grid,
+  };
+  const frame = (x, y, w, h) => ({ kind: 'frame', at: { x, y, w, h } });
+  const logged = [frame(261, 265, 495, 460), frame(783, 265, 515, 460), frame(1303, 265, 500, 460), frame(261, 730, 495, 460), frame(783, 730, 515, 460), frame(1303, 730, 500, 460)];
+  const [w1] = await resolveTargets([{ say: 'Six panes.', marks: logged }], look);
+  assert.deepEqual(w1.marks.map((m) => m.at.rect), [[0, 39, 600, 533], [600, 39, 600, 533], [1200, 39, 600, 533], [0, 572, 600, 533], [600, 572, 600, 533], [1200, 572, 600, 533]], 'each frame sits on its window');
+  assert.equal(refits.length, 0, 'window-sized boxes are not refitted to drawn content');
+  // The looser boxes of the first try (up to 26 points off an edge) still land on their windows.
+  const [w2] = await resolveTargets([{ say: 'x', marks: [frame(255, 730, 490, 440), frame(783, 270, 520, 450)] }], look);
+  assert.deepEqual(w2.marks.map((m) => m.at.rect), [[0, 572, 600, 533], [600, 39, 600, 533]]);
+  // A big box round no window (a pane, a picture) stays as the model gave it.
+  const [w3] = await resolveTargets([{ say: 'x', marks: [frame(785, 455, 1110, 625)] }], look);
+  assert.deepEqual(w3.marks[0].at.rect, [264, 164, 1274, 717], 'no window there: the box as given');
+  const [w4] = await resolveTargets([{ say: 'x', marks: [frame(785, 455, 1110, 625)] }], { pixel: look.pixel, refine: look.refine });
+  assert.deepEqual(w4.marks[0].at.rect, [264, 164, 1274, 717], 'no window list: the box as given');
+  assert.equal(refits.length, 0);
+  // Small things are still fitted to what's drawn, windows open or not.
+  const [w5] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { x: 30, y: 60, w: 40, h: 40 } }] }], look);
+  assert.deepEqual(w5.marks[0].at.rect, [20, 50, 30, 30], 'a small box is still refitted');
+  assert.equal(refits.length, 1);
+  assert.ok(windowSized([0, 0, 568, 528]) && !windowSized([0, 0, 300, 40]) && !windowSized([0, 0, 120, 400]), 'window-sized: big both ways');
+  assert.deepEqual(fitWindow([15, 40, 568, 528], grid), [0, 39, 600, 533]);
+  assert.equal(fitWindow([15, 40, 568, 528], []), null);
+  assert.equal(fitWindow([60, 40, 540, 528], grid), null, 'an edge 60 points off: not that window');
+  // Two windows fit (one stacked a few points off the other): the closer one; the frontmost when equally close.
+  assert.deepEqual(fitWindow([10, 40, 600, 533], [[0, 39, 600, 533], [12, 41, 600, 533]]), [12, 41, 600, 533]);
+  assert.deepEqual(fitWindow([5, 39, 600, 533], [[0, 39, 600, 533], [10, 39, 600, 533]]), [0, 39, 600, 533]);
+  console.log('draw window frame tests: passed');
 }
 
 // ---- parts: ids in order, never reused; screen marks clear on their own, cards stay

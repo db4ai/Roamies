@@ -312,3 +312,16 @@ cases('read-only loopholes', cmd, [
 }
 if (failures.length) { console.error(failures.join('\n')); process.exit(1); }
 console.log('safety loophole tests: passed');
+// One Allow covers the same kind of risky click: the kind is the risky word itself, so Delete and Send never share a yes.
+{
+  const { riskyKind } = await import('../safety.mjs');
+  assert.equal(riskyKind('Delete'), 'delete');
+  assert.equal(riskyKind('Delete post'), 'delete');
+  assert.equal(riskyKind('Pay now'), 'pay');
+  assert.equal(riskyKind('Log out'), 'log out');
+  assert.equal(riskyKind('删除账户'), '删除');
+  assert.equal(riskyKind('Settings'), null);
+  assert.equal(riskyKind('DELETE'), riskyKind('Delete post'), 'two labels of one kind share a key');
+  assert.notEqual(riskyKind('Delete'), riskyKind('Send'));
+  console.log('risky kind tests: passed');
+}

@@ -30,7 +30,7 @@ import { createTools, expand, fitImage, imageBlock, winOpen } from './tools.mjs'
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
-import { SpeechText, CueFilter, VOICE_CUES } from './speech.mjs';
+import { SpeechText, CueFilter, VOICE_CUES, endsWithQuestion } from './speech.mjs';
 import { createSpeaker } from './speaker.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
 import { createSecrets, retryLoad } from './secrets.mjs';
@@ -81,7 +81,7 @@ const DEFAULT_KEYS = process.platform === 'win32'
   : { talk: ['control', 'option'], summon: 'Control+Alt+KeyS', snap: 'Control+Alt+KeyA', list: 'Control+Alt+KeyL' };
 const DEFAULTS = {
   provider: null, model: null, sound: true, allowActions: false, voice: true,
-  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, setupVersion: 0, size: 'default', look: 'classic', introDone: false,
+  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, autoListen: false, setupVersion: 0, size: 'default', look: 'classic', introDone: false,
   replies: 'text', // 'voice': spoken with Fish Audio as well as shown
   fishModel: FISH_CHOICES[0].id, // Drama 3 (most expressive) or S2.1 Pro (natural pace, cheaper)
 };
@@ -340,7 +340,7 @@ const livePrompt = (context = '') => {
   const open = commitmentsText(), done = doneTodayText();
   const turn = `Live state (current as of this moment):
 ${frontNow ? `${frontNow}\n` : ''}- Editing files, running commands and controlling other apps: ${config.allowActions ? 'ALLOWED' : `switched OFF (tell the user to turn on "Allow File Edits & Commands" on the Behavior page in ${PANEL} if they want it)`}.
-${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${userName} holds ${talkWords()} to talk` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Voice page in ${PANEL}`})`}.` : ''}
+${VOICE_OK ? `- Voice: ${!config.voice ? 'off' : voiceReady() ? `on; ${userName} holds ${talkWords()} to talk${config.autoListen ? '. Auto-listen is on: when your reply to a spoken question ends with a question, the mic opens by itself for their answer' : ''}` : `on, but the speech model isn't downloaded yet (${voiceModel.status === 'downloading' ? 'downloading now' : `the Voice page in ${PANEL}`})`}.` : ''}
 - Shortcuts: show or hide you ${keyWords(keys().summon)}${SNAP_OK ? `; ask about an area ${keyWords(keys().snap)}` : ''}${CIRCLE_OK ? "; while holding the talk keys, moving the cursor round something circles it (no clicking; it snaps shut with a click when the circle closes, and loose lines don't count) and you'll see what they circled" : ''}; show the list ${keyWords(keys().list)}.${HANDS_OK ? '' : ' Asking about an area, reading app windows, finding things on screen by their words and working other apps need the Roamies app, which isn\'t running here; draw there with x, y from a screenshot.'}`;
   const memory = `${open ? `Open commitments:\n${open}` : 'No open commitments.'}${done ? `\nDone today (ticked off on the list or by you; still shown struck through until midnight):\n${done}` : ''}
 ${facts.length ? `What you know about ${userName}${total > facts.length ? ` (${facts.length} most relevant of ${total})` : ''}:\n${facts.map((f) => `- ${f.id}: ${f.text}`).join('\n')}` : `You don't know anything lasting about ${userName} yet.`}`;
@@ -477,10 +477,10 @@ let credsBaseUrl;
 
 // One run at a time: a new request waits for (or interrupts) the current one. Folding waits until none is left.
 let queued = 0;
-function enqueue(text, { interrupt = false, image = null, note = '' } = {}) {
+function enqueue(text, { interrupt = false, image = null, note = '', byVoice = false } = {}) {
   if (interrupt && busy) interruptQuietly();
   queued++;
-  running = running.then(() => prompt(text, image, note)).catch((e) => console.error('prompt', e))
+  running = running.then(() => prompt(text, image, note, byVoice)).catch((e) => console.error('prompt', e))
     .finally(() => { if (--queued === 0) maybeCompact(); });
   return running;
 }
@@ -708,10 +708,13 @@ function warmUp() {
 }
 // The front window, looked up when the talk keys are let go: the words take a moment more to arrive.
 let frontSoon = null;
-async function prompt(text, image = null, note = '') {
+// Auto-listen: the turn whose reply ended on a question, until the overlay says it's been typed out and said.
+let autoTurn = null;
+const autoListenOn = () => VOICE_OK && !!config.voice && !!config.autoListen && voiceReady() && !intro;
+async function prompt(text, image = null, note = '', byVoice = false) {
   const problem = await readyAgent();
   if (problem) return say(problem, 'concerned');
-  busy = true; quiet = false;
+  busy = true; quiet = false; autoTurn = null;
   if (!intro && !text.startsWith('(')) activity.asked(text);
   menu();
   controller = new AbortController();
@@ -821,7 +824,10 @@ async function prompt(text, image = null, note = '') {
     if (controller.signal.aborted) voice?.abort(); else { spoken?.flush(); voice?.end(); }
     trail.end();
     ink.endRequest();
-    ui({ kind: 'agent', e: stalled ? { type: 'error', message: stallMessage() } : { type: 'done' } });
+    // Asked by voice and answered with a question: the overlay opens the mic once the reply has been typed and said.
+    const listen = byVoice && !stalled && !controller.signal.aborted && autoListenOn() && endsWithQuestion(lastReply) ? { turn, speech: voice?.id ?? null } : null;
+    autoTurn = listen ? turn : null;
+    ui({ kind: 'agent', e: stalled ? { type: 'error', message: stallMessage() } : { type: 'done', ...(listen ? { listen } : {}) } });
     logUsage({ ...use, ms: Date.now() - use.t });
     logLine('request_done', { turn, ms: Date.now() - use.t, calls: use.calls, tools: use.tools, in: use.in, cacheRead: use.cacheRead, cacheWrite: use.cacheWrite, out: use.out });
   } catch (err) {
@@ -861,6 +867,8 @@ const pending = new Map();
 function ask(opts, signal) {
   const id = `a${++askSeq}`;
   const to = onboarding ? ob : ui;
+  // The setup guide has no buttons: its answer box takes a typed y.
+  if (onboarding && opts.choices) opts = { ...opts, placeholder: `${opts.placeholder} Type y to allow.` };
   to({ kind: 'ask', id, ...opts });
   return new Promise((resolve) => {
     pending.set(id, resolve);
@@ -1161,7 +1169,7 @@ function panelState() {
     replies: config.replies === 'voice' ? 'voice' : 'text', fishKey: speech.on,
     fishModel: speech.pick, fishModels: FISH_CHOICES, fishFree: speech.on && speech.model.endsWith('-free'),
     voice: VOICE_OK ? {
-      on: !!config.voice, keys: talkSymbols(), ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false,
+      on: !!config.voice, keys: talkSymbols(), ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen,
       download: NEEDS_MODEL && config.voice && !voiceReady() ? { status: voiceModel.status, pct: voiceModel.total ? Math.floor((voiceModel.done / voiceModel.total) * 100) : 0, size: sizeLabel() } : null,
     } : null,
     sound: !!config.sound, actions: !!config.allowActions,
@@ -1294,6 +1302,7 @@ async function onMenu(id) {
   else if (id === 'snap') areaSnap();
   else if (id === 'list') showList({ seconds: 20 });
   else if (id === 'mutetalk') { config.muteWhileTalking = config.muteWhileTalking === false; saveConfig(); voiceConfig(); menu(); }
+  else if (id === 'autolisten') { config.autoListen = !config.autoListen; saveConfig(); menu(); }
   else if (id === 'voicedl') startVoiceDownload();
   else if (id === 'voice') {
     config.voice = !config.voice; saveConfig(); voiceConfig(); menu();
@@ -1336,15 +1345,15 @@ async function areaSnap() {
 let snapping = false;
 // Words said while ⌃⌥ was held, maybe with an area marked by drawing on the screen at the same time.
 async function onSpoken(text, area) {
-  if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap() });
+  if (!area?.file) return enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
   try {
     await fitImage(area.file);
     const image = await imageBlock(area.file, 'image/png');
     takeSnap(); // the drawing replaces an older ⌃⌥A snap
-    enqueue(text, { interrupt: true, image, note: describeMarks(area.strokes, area.rect) });
+    enqueue(text, { interrupt: true, image, note: describeMarks(area.strokes, area.rect), byVoice: true });
   } catch {
     fs.unlink(area.file).catch(() => {});
-    enqueue(text, { interrupt: true, image: takeSnap() });
+    enqueue(text, { interrupt: true, image: takeSnap(), byVoice: true });
   }
 }
 // A pending snap goes with the next spoken question, if it comes within two minutes.
@@ -1527,6 +1536,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   } else if (m.type?.startsWith('ob_') || m.type?.startsWith('chat_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
   else if (m.type?.startsWith('voice')) onVoice(m);
   else if (m.type === 'snap') areaSnap();
+  else if (m.type === 'auto_listen') {
+    // Still the latest reply, nothing running since, and still switched on: listen once, hands-free.
+    if (m.turn !== autoTurn || busy || !autoListenOn()) return;
+    autoTurn = null;
+    logLine('auto_listen', { turn: m.turn });
+    send({ type: 'listen' });
+  }
+  else if (m.type === 'listen_cancel') { autoTurn = null; send({ type: 'listen_cancel' }); } // Esc while the mic is on
   // A link clicked on the research card: web and mail links only.
   else if (m.type === 'open_link') { const v = checkLink(m.url); if (v.level === SAFE) openUrl(String(m.url)); else console.error('open_link blocked:', v.reason); }
   else if (m.type === 'list_toggle') toggleItem(String(m.id)).catch((e) => console.error('list', e));

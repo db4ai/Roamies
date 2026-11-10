@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { SpeechText, speakable, CueFilter, VOICE_CUES, CUE_INTENSITY } from '../speech.mjs';
+import { SpeechText, speakable, CueFilter, VOICE_CUES, CUE_INTENSITY, endsWithQuestion } from '../speech.mjs';
 
 const said = (chunks, flushAt = []) => {
   const out = [];
@@ -116,3 +116,15 @@ console.log('speech text tests: passed');
   const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
   assert.match(side, /e\.type === 'toolcall_delta'\) \{\s*spoken\?\.flush\(\)/, 'speech is flushed as soon as a tool call starts streaming');
 }
+
+// Auto-listen: only a reply whose last words are a question opens the mic.
+assert.equal(endsWithQuestion('Want the tip too?'), true);
+assert.equal(endsWithQuestion('Done.'), false);
+assert.equal(endsWithQuestion('Shall I send it? [warm]'), true);
+assert.equal(endsWithQuestion('**Which one?**'), true);
+assert.equal(endsWithQuestion('Want me to check? I already sent it.'), false);
+assert.equal(endsWithQuestion('Two options.\n- Paris\n- Rome\nWhich one?'), true);
+assert.equal(endsWithQuestion('Ready? 🙂\n'), true);
+assert.equal(endsWithQuestion('He said "really?"'), true);
+assert.equal(endsWithQuestion(''), false);
+assert.equal(endsWithQuestion(null), false);

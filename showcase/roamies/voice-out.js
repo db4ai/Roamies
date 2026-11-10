@@ -8,6 +8,9 @@
   // How fast the voice talks (characters a second), learned from each whole reply: its audio length against how much
   // text it said. Drawings pace their marks to it (ink.js).
   let rate = 15, secs = 0;
+  // Replies that are over: their end arrived, or they were stopped or replaced (auto-listen waits for this).
+  const over = new Set();
+  const isOver = (x) => { over.add(x); if (over.size > 20) over.delete(over.values().next().value); };
 
   const ctx = () => {
     if (!ac) {
@@ -30,6 +33,7 @@
   };
 
   const stop = () => {
+    if (id) isOver(id);
     id = null; endAt = 0;
     if (!ac || !live.length) return;
     const t = ac.currentTime, old = live; live = [];
@@ -54,6 +58,7 @@
     handle(m) {
       if (m.stop) return stop();
       if (m.end) { // the last chunk is already scheduled
+        isOver(m.id);
         if (m.id === id && m.chars > 20 && secs > 1) rate = Math.min(30, Math.max(8, rate * 0.6 + (m.chars / secs) * 0.4));
         return;
       }
@@ -61,6 +66,8 @@
     },
     playing: () => !!ac && live.length > 0 && ac.currentTime < endAt + 0.05,
     cps: () => rate,
+    // That reply has nothing left to play: its end arrived (or it was stopped), and nothing is still sounding.
+    finished(rid) { return !this.playing() && (!rid || over.has(rid)); },
     // Smoothed RMS, roughly 0 (quiet) to 1 (loud speech).
     level() {
       if (!this.playing()) return (lv = 0);

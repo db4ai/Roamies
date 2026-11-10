@@ -76,6 +76,23 @@ pub fn main_window(wins: &[Win]) -> Option<&Win> {
     wins.iter().find(|w| !w.title.is_empty() || w.r.area() >= big * 0.05).or(wins.first())
 }
 
+// The same app's windows that opened over the plan's window (a new document, a dialog), front first, at most 3;
+// all of that app's windows when the plan's window has closed. Never the older windows behind it.
+pub fn newer_windows(all: &[Win], pinned: &Win) -> Vec<Win> {
+    let own: Vec<&Win> = all.iter().filter(|w| w.pid == pinned.pid).collect();
+    let end = own.iter().position(|w| w.id == pinned.id).unwrap_or(own.len());
+    own[..end].iter().take(3).map(|w| (*w).clone()).collect()
+}
+
+// The plan's window as it is now (it may have moved or been resized); once it has closed, that app's front window.
+// None: the app has no window open.
+pub fn current_window(all: &[Win], pinned: &Win) -> Option<Win> {
+    all.iter().find(|w| w.id == pinned.id).cloned().or_else(|| {
+        let own: Vec<Win> = all.iter().filter(|w| w.pid == pinned.pid).cloned().collect();
+        main_window(&own).cloned()
+    })
+}
+
 const BROWSER_EXES: &[&str] = &["chrome", "msedge", "brave", "firefox", "opera", "vivaldi", "chromium", "arc", "zen", "librewolf", "waterfox", "floorp", "thorium"];
 
 pub fn is_browser(exe: &str) -> bool {
@@ -698,6 +715,10 @@ pub fn ocr_matches(words: &[(String, Rect)], q: &str) -> Vec<Rect> {
 pub fn self_test() -> Vec<(&'static str, bool)> {
     let win = |id: i64, title: &str, w: f64, h: f64| Win { id, pid: 1, app: "App".into(), exe: "app".into(), title: title.into(), r: Rect::new(0.0, 0.0, w, h) };
     let mw = |v: Vec<Win>| main_window(&v).map(|w| w.id);
+    let pw = |id: i64, pid: u32| Win { id, pid, ..Default::default() };
+    let nw = |v: Vec<Win>| newer_windows(&v, &pw(2, 1)).iter().map(|w| w.id).collect::<Vec<_>>();
+    let cw = |v: Vec<Win>| current_window(&v, &pw(2, 1)).map(|w| (w.id, w.r.x as i64, w.r.y as i64));
+    let moved = Win { id: 2, pid: 1, r: Rect::new(40.0, 60.0, 600.0, 400.0), ..Default::default() };
     let canvas = |w: usize, h: usize, rects: &[Rect]| {
         let mut b = vec![0u8; w * h * 4];
         for i in 0..w * h {
@@ -722,6 +743,18 @@ pub fn self_test() -> Vec<(&'static str, bool)> {
         ("a titled small window in front is kept", mw(vec![win(1, "Export", 300.0, 200.0), win(2, "Doc", 1800.0, 1066.0)]) == Some(1)),
         ("a sizeable untitled window in front is kept", mw(vec![win(1, "", 900.0, 600.0), win(2, "Doc", 1800.0, 1066.0)]) == Some(1)),
         ("an app with only a small window still has it", mw(vec![win(1, "", 183.0, 88.0)]) == Some(1)),
+        // Regression: click_text "Delete" searched the window the plan started on, not the document it had opened since.
+        ("a window in front of the plan's window is searched", nw(vec![pw(5, 1), pw(2, 1)]) == vec![5]),
+        ("windows behind the plan's window are not", nw(vec![pw(2, 1), pw(1, 1)]).is_empty()),
+        ("another app's window in front is not", nw(vec![pw(9, 7), pw(5, 1), pw(2, 1)]) == vec![5]),
+        ("the plan's window gone: that app's windows", nw(vec![pw(9, 7), pw(5, 1), pw(4, 1)]) == vec![5, 4]),
+        ("at most 3, front first", nw(vec![pw(8, 1), pw(7, 1), pw(6, 1), pw(5, 1), pw(2, 1)]) == vec![8, 7, 6]),
+        // Regression: the plan's window had closed, and click_text "Delete" still looked inside its old rectangle, so it
+        // picked the dialog's sentence containing "delete" over the Delete button beside it.
+        ("the plan's window still open: as it is now", cw(vec![pw(5, 1), moved]) == Some((2, 40, 60))),
+        ("the plan's window gone: that app's front window", cw(vec![pw(9, 7), pw(5, 1), pw(4, 1)]) == Some((5, 0, 0))),
+        ("the plan's window gone and none left: nothing", cw(vec![]).is_none()),
+        ("another app's windows are never taken", cw(vec![pw(9, 7), pw(8, 7)]).is_none()),
         ("an app is found by its program name", app_matches("Microsoft Edge", "msedge", "msedge") && app_matches("Notepad", "notepad", "notepad.exe")),
         ("an app is found by its own name", app_matches("Microsoft Edge", "msedge", "edge") && !app_matches("Microsoft Edge", "msedge", "")),
         ("'browser' finds a browser, not other apps", app_matches("Google Chrome", "chrome", "browser") && !app_matches("Notepad", "notepad", "browser")),

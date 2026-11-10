@@ -100,5 +100,29 @@
     c.restore();
   }
 
-  R.glass = { ACC, HOT, MID, DEEP, EDGE, GLASS, TEXT, DIM, CORAL, NOTE, MONO, rgba, stepped, steppedPath, chrome, textW, typed, wrapRows, ringPts, pen };
+  // A pixel button like the drawings' chips (ink.js): filled is teal with dark ink, otherwise dark glass with a teal
+  // edge and light ink. focus adds a bright ring, so the keyboard's choice shows; down presses it into its shadow.
+  const CHIP_F = `700 11px ${MONO}`, INK_DARK = '#032722';
+  const mix = (a, b, k) => `rgb(${hex(a).map((v, i) => Math.round(v + (hex(b)[i] - v) * k)).join(',')})`;
+  const chipW = (label) => Math.round(textW(label, CHIP_F) + 22);
+  function chip(c, x, y, w, h, label, o = {}) {
+    c.save();
+    if (o.focus) { c.strokeStyle = HOT; c.lineWidth = 2; c.stroke(steppedPath(x - 3.5, y - 3.5, w + 7, h + 9, 6)); }
+    if (o.down) c.translate(0, 2);
+    c.fillStyle = o.filled ? mix(ACC, '#000000', 0.62) : 'rgba(0,0,0,0.45)'; c.fill(steppedPath(x, y + (o.down ? 1 : 3), w, h, 4));
+    const face = steppedPath(x, y, w, h, 4);
+    if (o.filled) {
+      c.fillStyle = o.hover ? mix(ACC, '#ffffff', 0.3) : ACC; c.fill(face);
+      c.fillStyle = 'rgba(255,255,255,0.55)'; c.fillRect(x + 4, y + 1, w - 8, 1.5); c.fillStyle = 'rgba(3,39,34,0.25)'; c.fillRect(x + 4, y + h - 2.5, w - 8, 1.5);
+    } else {
+      c.fillStyle = GLASS; c.fill(face);
+      if (o.hover) { c.fillStyle = rgba(ACC, 0.16); c.fill(face); }
+      c.strokeStyle = ACC; c.lineWidth = 1.5; c.stroke(face);
+    }
+    c.font = CHIP_F; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = o.filled ? INK_DARK : TEXT;
+    c.fillText(String(label ?? ''), x + w / 2, y + h / 2 + 0.5);
+    c.restore();
+  }
+
+  R.glass = { ACC, HOT, MID, DEEP, EDGE, GLASS, TEXT, DIM, CORAL, NOTE, MONO, rgba, stepped, steppedPath, chrome, textW, typed, wrapRows, ringPts, pen, chip, chipW, CHIP_H: 23 };
 })();

@@ -15,6 +15,12 @@ const swap = ${JSON.stringify(path.join(dir, 'front.json'))};
 const win = fs.existsSync(swap) ? JSON.parse(fs.readFileSync(swap, 'utf8')) : { id: 7, app: 'TextEdit', title: 'notes.txt', bounds: [0, 0, 800, 600] };
 let o = { ok: true, window: win };
 if (a[0] === 'act') { const p = JSON.parse(a[1]); o = p.app === 'NoSuchAppRoamiesTest' ? { ok: false, error: 'No matching window is open.' } : { ok: true, done: p.steps.map((s) => s.do), window: win }; }
+// Live progress on stderr, as the real helpers write it: where each step lands, what it types, when it takes the cursor.
+if (a[0] === 'act' && JSON.parse(a[1]).app === 'HopTest') {
+  for (const d of [{ ev: 'start', window: win, steps: 3 }, { ev: 'step', i: 0, do: 'click', label: 'Save', bounds: [100, 200, 80, 24] }, { ev: 'step', i: 1, do: 'key', label: 'cmd+a' },
+    { ev: 'borrow' }, { ev: 'step', i: 2, do: 'type', label: '', text: 'my secret words', bounds: [300, 400, 200, 30] }, { ev: 'return' }]) console.error('@' + JSON.stringify(d));
+  console.error('not progress');
+}
 if (a[0] === 'find-text') o = { ok: true, matches: [{ text: a[2], match: 'exact', role: 'button', bounds: [100, 100, 80, 24], window: win }] };
 if (a[0] === 'ui') o = { ok: true, window: win, controls: [], texts: [], note: 'Nothing to list.' };
 if (a[0] === 'front') { if (win.slowFront) { const t = Date.now(); while (Date.now() - t < 2000); } o = { ok: true, app: win.app, title: win.title, ...(win.url ? { url: win.url } : {}) }; }
@@ -48,6 +54,21 @@ assert.ok(calls().some((c) => c[0] === 'capture' && c[3] === '1568'));
 // Shot at once with nothing shown on screen: no window lookup first, no preview copy for an animation.
 assert.ok(!calls().some((c) => c[0] === 'locate'), 'no locate round trip before the shot');
 assert.equal(calls().find((c) => c[0] === 'capture').length, 4, 'no preview thumbnail requested');
+
+// While it acts, the overlay hears where each step lands (in order) and when the real cursor is taken, between
+// "on" and "off". Never what is typed.
+{
+  const seen = [];
+  const made = createTools({ allowActions: () => true, ui: (m) => { if (m.kind === 'hands') seen.push(m); }, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' });
+  await made.hands('act', JSON.stringify({ app: 'HopTest', steps: [{ do: 'click', id: 1 }, { do: 'key', key: 'cmd+a' }, { do: 'type', text: 'my secret words' }] }));
+  assert.deepEqual(seen, [{ kind: 'hands', on: true }, { kind: 'hands', step: { bounds: [100, 200, 80, 24] } }, { kind: 'hands', borrow: true },
+    { kind: 'hands', step: { bounds: [300, 400, 200, 30] } }, { kind: 'hands', on: false }]);
+  assert.ok(!JSON.stringify(seen).includes('secret'), 'typed text never reaches the overlay');
+  // Reading a window is not acting: nothing is sent.
+  seen.length = 0;
+  await made.hands('ui', 'front');
+  assert.deepEqual(seen, []);
+}
 
 // An app that isn't installed: one clear answer instead of "No matching window".
 await assert.rejects(tool('act_in_app').execute({ target: 'NoSuchAppRoamiesTest', steps: [{ do: 'key', key: 'return' }] }, ctx), /no app called "NoSuchAppRoamiesTest"/);

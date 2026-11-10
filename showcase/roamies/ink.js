@@ -1405,6 +1405,8 @@
     get reminding() { return remOpen(); },
     get busy() { return G.playing || marks.length > 0; },
     get playing() { return G.playing; },
+    // Marks still on the real screen (frames, loops, arrows, labels): unlike cards they have no close button.
+    get loose() { return marks.some((m) => m.alive && m.screen && !m.leaving); },
     // Resolves once nothing is being drawn (at once if nothing is).
     whenIdle: () => (G.playing || G.q.length ? new Promise((r) => G.idle.push(r)) : Promise.resolve()),
     // Where a card w × h would go now (the web answer card uses it, so it lines up with the drawn ones): [x, y, w, h].

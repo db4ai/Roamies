@@ -191,6 +191,7 @@ struct Ctx {
     done: Vec<String>,
     i: usize,
     clicked_spot: bool,
+    switched: bool,
 }
 
 fn s_str<'a>(s: &'a Value, k: &str) -> Option<&'a str> {
@@ -506,6 +507,19 @@ impl Ctx {
     }
 
     fn step(&mut self, s: &Value, what: &str, sig_before: &mut Option<String>, early: &[usize]) -> Result<(), String> {
+        // Earlier steps may have moved the plan's window, or closed it and opened another (Ctrl+N over a dialog):
+        // text was looked for inside the old window's rectangle.
+        if what != "wait" {
+            if let Some(cur) = current_window(&windows(), &self.w) {
+                let moved = cur.id != self.w.id;
+                B.lock().unwrap().win = Some(cur.clone());
+                self.w = cur;
+                if moved {
+                    self.switched = true;
+                    self.controls = walk(&self.w);
+                }
+            }
+        }
         let n = self.n();
         let confirmed = s.get("confirmed").and_then(Value::as_bool) == Some(true);
         match what {
@@ -555,6 +569,7 @@ impl Ctx {
                 // A checkbox or radio by its label: press the control itself; clicking the words doesn't always tick it.
                 let boxes: Vec<(Node, Value)> = self.controls.iter().filter(|c| [CT_CHECKBOX, CT_RADIO].contains(&c.0.ct) && fold(&label_of(&c.1)) == fold(&q) && c.1["offscreen"].as_bool() != Some(true)).cloned().collect();
                 let mut hit: Option<(Node, String)> = None;
+                let mut opened = String::new();
                 if let Some(b) = boxes.iter().find(|b| b.0.web) {
                     hit = Some((b.0.clone(), label_of(&b.1)));
                 } else if let Some(near) = s_str(s, "near").filter(|n| !n.is_empty()) {
@@ -583,6 +598,20 @@ impl Ctx {
                         tree = self.tree();
                         hit = first(&tree);
                     }
+                    // Not in the plan's window: an earlier step may have opened a new one (Ctrl+N, a dialog). Look there.
+                    if hit.is_none() && !q.is_empty() {
+                        for nw in newer_windows(&windows(), &self.w) {
+                            let t = Tree::of_window(&nw);
+                            let Some(m) = t.find_text(nw.r, &q, false, 8).into_iter().find(|m| click_match(m.1["match"].as_str().unwrap_or(""))) else { continue };
+                            hit = Some((m.0, m.1["text"].as_str().unwrap_or("").to_string()));
+                            opened = if nw.title.is_empty() { " (in the window that opened)".into() } else { format!(" (in the window that opened: {})", nw.title) };
+                            tree = t;
+                            B.lock().unwrap().win = Some(nw.clone());
+                            self.w = nw;
+                            self.switched = true;
+                            break;
+                        }
+                    }
                 }
                 let (Some((e, text)), false) = (hit, q.is_empty()) else {
                     return Err(format!("Step {n}: no visible text \"{q}\" in {}. Check the exact words with a screenshot or read_window.", self.w.app));
@@ -600,7 +629,7 @@ impl Ctx {
                     let Some(f) = live_rect(&e.el).or(e.r) else { return Err(format!("Step {n}: couldn't click \"{q}\".")) };
                     self.real_click(f.mid_x(), f.mid_y())?;
                 }
-                self.done.push(format!("clicked \"{text}\""));
+                self.done.push(format!("clicked \"{text}\"{opened}"));
                 ms(150);
                 self.controls = walk(&self.w);
             }
@@ -926,7 +955,7 @@ pub fn act(arg: &str) -> ! {
     if !bg && !bring_to_front(&w) {
         out(json!({ "ok": false, "error": format!("Couldn't bring {} to the front, so nothing was typed or clicked. Ask the user to click its window once, then try again.", w.app), "done": [] }));
     }
-    let mut c = Ctx { controls: walk(&w), w, target, done: vec![], i: 0, clicked_spot: false };
+    let mut c = Ctx { controls: walk(&w), w, target, done: vec![], i: 0, clicked_spot: false, switched: false };
     progress(json!({ "ev": "start", "window": win_info(&c.w), "steps": steps.len() }));
     let dos: Vec<&str> = steps.iter().map(|s| s_str(s, "do").unwrap_or("")).collect();
     let early = react_waits(&dos);
@@ -985,7 +1014,8 @@ pub fn act(arg: &str) -> ! {
     // A click or key may have changed the page: hand back what's there now, so no read_window round trip is needed.
     let changing = dos.iter().any(|d| ["click", "click_text", "press_button", "key", "click_at", "fill", "choose", "scroll", "set"].contains(d));
     if changing {
-        let w2 = resolve(&c.target).unwrap_or_else(|| c.w.clone());
+        // After a switch to a window the plan opened, show that one while it is still open.
+        let w2 = c.switched.then(|| windows().into_iter().find(|x| x.id == c.w.id)).flatten().or_else(|| resolve(&c.target)).unwrap_or_else(|| c.w.clone());
         let now: Vec<Value> = settle(&w2).into_iter().map(|c| c.1).collect();
         out(json!({ "ok": true, "done": c.done, "window": win_info(&w2), "controls": now, "texts": page_lines(&w2, 2000) }));
     }

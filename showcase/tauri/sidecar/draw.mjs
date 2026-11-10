@@ -118,7 +118,25 @@ export function pickTextMatch(matches, find) {
   return (matches ?? []).find((m) => m.match !== 'partial' && m.text.trim().length <= Math.max(40, q.length * 3)) ?? null;
 }
 
-/** One place → { rect: [x, y, w, h] in global screen points, r, role, name }. look: { text(find), id(n), pixel(x, y), snap?(rect) }. */
+/** Big enough to be a window or a pane of one. The fit to drawn content is for icons, words and buttons: on a box
+ *  this size it joined the neighbouring windows in, so frames came out several windows wide. */
+export const windowSized = ([, , w, h]) => w >= 200 && h >= 150;
+/** The open window a box was drawn round: every edge within 6% of that window's side (16 to 48 points). The closest
+ *  when several fit, the frontmost on a tie; null when none does. windows: [x, y, w, h] each, front to back. */
+export function fitWindow(rect, windows) {
+  const [x, y, w, h] = rect;
+  let best = null, bestOff = Infinity;
+  for (const b of windows ?? []) {
+    if (!Array.isArray(b) || !(b[2] > 0 && b[3] > 0)) continue;
+    const tx = clamp(b[2] * 0.06, 16, 48), ty = clamp(b[3] * 0.06, 16, 48);
+    const l = Math.abs(x - b[0]), r = Math.abs(x + w - b[0] - b[2]), t = Math.abs(y - b[1]), u = Math.abs(y + h - b[1] - b[3]);
+    if (l > tx || r > tx || t > ty || u > ty) continue;
+    if (l + r + t + u < bestOff) { bestOff = l + r + t + u; best = b; }
+  }
+  return best ? [...best] : null;
+}
+
+/** One place → { rect: [x, y, w, h] in global screen points, r, role, name }. look: { text(find), id(n), pixel(x, y), refine?(rect), snap?(rect), windows?() }. */
 export async function resolveTarget(t, look, r) {
   let rect, role = '', name = '', live;
   if (t.text != null) {
@@ -134,9 +152,11 @@ export async function resolveTarget(t, look, r) {
     if (t.w != null && t.h != null && t.w > 0 && t.h > 0) {
       const a = await look.pixel(t.x - t.w / 2, t.y - t.h / 2), b = await look.pixel(t.x + t.w / 2, t.y + t.h / 2);
       rect = [a[0], a[1], b[0] - a[0], b[1] - a[1]];
+      // Round a window: that window's own edges, or the box as given when no window is there.
+      if (windowSized(rect)) rect = fitWindow(rect, await look.windows?.()) ?? rect;
       // Fitted to what's really drawn there (an icon, a shape, a word, a letter); else the button or field it's a few
       // pixels off. Models' pixel guesses are often a letter or a few points out.
-      rect = (await look.refine?.(rect)) ?? (await look.snap?.(rect)) ?? rect;
+      else rect = (await look.refine?.(rect)) ?? (await look.snap?.(rect)) ?? rect;
     } else { const a = await look.pixel(t.x, t.y), g = [a[0] - 14, a[1] - 14, 28, 28]; rect = (await look.refine?.(g)) ?? g; }
   } else throw new Error('Give a place: text shown on screen, an id from read_window, or x and y from a screenshot.');
   rect = rect.map((v) => Math.round(v));

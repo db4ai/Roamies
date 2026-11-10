@@ -160,3 +160,14 @@ export class SpeechText {
     }
   }
 }
+
+/** Whether a reply's last words are a question (voice cues, markdown, emoji and closing quotes ignored). */
+export function endsWithQuestion(text) {
+  const s = String(text ?? '')
+    .replace(CUE, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // [name](url) → name
+    .replace(/\[[a-z]+(?:[ ,-]+[a-z]+){0,3}\]\s*$/, '') // a free-form cue at the very end
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]/gu, '')
+    .replace(/[\s*_~`"'”’»)\]]+$/u, '');
+  return /[?？]$/.test(s);
+}
