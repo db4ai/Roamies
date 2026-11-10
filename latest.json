@@ -1,0 +1,19 @@
+{
+  "version": "0.1.32",
+  "notes": "Roamies 0.1.32",
+  "pub_date": "2026-11-10T00:00:11.871Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZnoxWVBMMFVMMUhCSFdKTmkrcExFdEg2MktvaXo0SWdWdDJjcnRCY0VzYkdxemtCYmNzTk1zWHRqV0Vteko1Rzl6NE5QU3pJeDVIaWJrK0xJODJhSU5hcTNpTlNyVFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjY4MDk5CWZpbGU6Um9hbWllcy5hcHAudGFyLmd6CXZlcnNpb246MC4xLjMyCis0MnRhU3grMnpqRXdQdTIzVk1aRFg5Yi9neXZRR0Z1c2I1eHA1YkdKQXZ2d1dJdzhXU3A3QWltZ0Z3UzMvaGpxcWdmbDkyS255OUVVY0JTOWM3R0N3PT0K",
+      "url": "https://api.github.com/repos/KenKaiii/Roamies/releases/assets/729422223"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZnoxWVBMMFVMMUszdVg2bmppdWUvZW9IRklFb2tuRUNVa3hJMlhYMnlqZUIyMjVnRnBUSk82TWkrV3puZzdZMzBXSkpwWmpURGFqSjlBWDIxRnpma3V0bEdaVGpCZFFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjY4MzUyCWZpbGU6Um9hbWllcy5hcHAudGFyLmd6CXZlcnNpb246MC4xLjMyCmUyNkZmOFptbGtrNDcyNExjdW1uT3lXUE11ekM2YmNibi9HKzlGNmZEQm1Hd0c3YmxiVmVKL3g4NkNxZnhleEphcHZUYzhBb2ZVdm9DNkRlNDhKekJRPT0K",
+      "url": "https://api.github.com/repos/KenKaiii/Roamies/releases/assets/729435056"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSZnoxWVBMMFVMMUR1ZjdmRlMrcTlhS2FoRWZneWtNS2NsUUtzQWZvWHFHZjN1WUdUUEZMdzVlcHRmYjYxUWx4aDhnamFZaUFrcWM3eThUZTJaNm9lVFpGWXpURDFQQUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjY4NzMzCWZpbGU6Um9hbWllc18wLjEuMzJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4zMgpXK2x4TzJsUEd4Y2pCYW9vOUNsWDFCUWovdmF5U1hNbk9PVWE2TWpTUXRabHd6amZhMklOV1h5Skt1NWVlTDdSV2pqUTFUazBVclVYU1NiVnE4NjBEZz09Cg==",
+      "url": "https://api.github.com/repos/KenKaiii/Roamies/releases/assets/729450398"
+    }
+  }
+}
