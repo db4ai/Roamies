@@ -28,7 +28,7 @@ export function normalizeLocal(config = {}) {
   const model = (config.modelId ?? config.model?.id ?? '').trim();
   return {
     enabled: config.enabled !== false,
-    baseUrl: config.baseUrl.trim(),
+    baseUrl: url, // trailing slashes trimmed, so /v1/chat/completions is built from a clean base
     keyName: (config.keyName || LOCAL_DEFAULT_KEY_NAME).trim() || LOCAL_DEFAULT_KEY_NAME,
     model: model || null,
     context,

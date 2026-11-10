@@ -32,7 +32,7 @@ test('createLocalVoice: a transport result is emitted byte-for-byte', () => {
   assert.deepEqual(Array.from(got[0]), [9, 8, 7]);
 });
 
-test('createLocalVoice: a streaming transport emits each chunk', () => {
+test('createLocalVoice: a streaming transport emits each chunk', async () => {
   const got = [];
   const v = createLocalVoice({
     baseURL: 'http://localhost:4000/tts',
@@ -41,6 +41,7 @@ test('createLocalVoice: a streaming transport emits each chunk', () => {
     onEnd: () => {},
   });
   v.start('stream').end();
+  await Promise.resolve(); // a streamed chunk arrives on a microtask, never synchronously
   assert.deepEqual(Array.from(got[0]), [1, 1, 1]);
 });
 
