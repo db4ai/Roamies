@@ -32,6 +32,11 @@ import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
 import { SpeechText, CueFilter, VOICE_CUES, endsWithQuestion } from './speech.mjs';
 import { createSpeaker } from './speaker.mjs';
+import {
+  LOCAL_PROVIDER_ID, LOCAL_PROVIDER_LABEL, LOCAL_PRESETS, LOCAL_TTS_DEFAULT_MODEL, LOCAL_TTS_DEFAULT_VOICE,
+  normalizeLocal, isLocalEnabled, localMenuProvider, localModel, localAgentRoute, localSpeechUrl, localModelsUrl,
+} from './localprovider.mjs';
+import { createLocalVoice, createSpeechTransport } from './localspeaker.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
 import { createSecrets, retryLoad } from './secrets.mjs';
 import { createActivity } from './activity.mjs';
@@ -84,6 +89,10 @@ const DEFAULTS = {
   onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, autoListen: false, setupVersion: 0, size: 'default', look: 'classic', introDone: false,
   replies: 'text', // 'voice': spoken with Fish Audio as well as shown
   fishModel: FISH_CHOICES[0].id, // Drama 3 (most expressive) or S2.1 Pro (natural pace, cheaper)
+  // The Local gateway (LiteLLM on the DGX or IGX): off until a base URL and model are chosen in the panel.
+  local: { enabled: false, baseUrl: '', modelId: '', context: null, keyName: 'local-llm' },
+  // The Local voice (Qwen3-TTS on the DGX). Off until its URL is set; falls back to Fish or text.
+  localVoice: { enabled: false, baseUrl: '', model: LOCAL_TTS_DEFAULT_MODEL, voice: LOCAL_TTS_DEFAULT_VOICE, keyName: 'local-tts' },
 };
 const SIZES = [['default', 'Default'], ['small', 'Small'], ['cursor', 'Cursor']];
 // What the sidekick looks like: the goo blob, JARVIS (a globe of light with a HUD reticle at cursor size) or
@@ -134,6 +143,118 @@ speech.setModel(config.fishModel);
 // one failed read left spoken replies off until the app restarted.
 const fishKeyLoaded = retryLoad(() => secrets.get('fish-audio').then((k) => { if (k && !speech.on) { speech.setKey(k); menu(); } }), { onError: (e) => console.error('fish key', e.message) });
 
+// ---------- spoken replies (Local voice: Qwen3-TTS on the DGX) ----------
+// The DGX server is OpenAI-compatible (POST /v1/audio/speech -> WAV), so the transport is a fetch per sentence.
+// It reports audio with the same {kind:'speech'} messages Fish uses, but carries its own rate (24 kHz) because
+// the overlay's Fish path assumes Fish's. Off until a URL (and key) are saved in the panel.
+const localVoiceConfig = () => config.localVoice ?? {};
+const localVoiceReady = () => !!(localVoiceConfig().enabled && String(localVoiceConfig().baseUrl ?? '').trim());
+let localVoiceKey = null;
+let localSpeechId = null;
+let localSpeechSeq = 0;
+// The transport starts out silent and is replaced by configureLocalVoice() once the key is read, so a reply can
+// never race a half-configured engine. onAudio carries the WAV's real rate (24 kHz on the DGX) because the
+// overlay's Fish path assumes Fish's rate.
+const NO_LOCAL_TRANSPORT = () => null;
+const localSpeech = createLocalVoice({
+  baseURL: localVoiceConfig().baseUrl ?? '',
+  model: localVoiceConfig().model ?? LOCAL_TTS_DEFAULT_MODEL,
+  transport: NO_LOCAL_TRANSPORT,
+  onAudio: (pcm, rate) => {
+    if (!localSpeechId) return;
+    ui({ kind: 'speech', id: localSpeechId, rate, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
+  },
+  onEnd: () => { if (localSpeechId) ui({ kind: 'speech', id: localSpeechId, end: true }); },
+});
+function configureLocalVoice() {
+  const c = localVoiceConfig();
+  if (!c.enabled || !String(c.baseUrl ?? '').trim() || !localVoiceKey) return;
+  localSpeech.setKey(localVoiceKey);
+  localSpeech.setModel(c.model ?? LOCAL_TTS_DEFAULT_MODEL);
+  localSpeech.setVoice(c.voice ?? LOCAL_TTS_DEFAULT_VOICE);
+  // Rebuilt on every config change so an edited endpoint, key or voice takes effect on the next reply.
+  localSpeech.setTransport(createSpeechTransport({
+    baseURL: localSpeechUrl(c.baseUrl),
+    apiKey: localVoiceKey,
+    model: c.model ?? LOCAL_TTS_DEFAULT_MODEL,
+    voice: c.voice ?? LOCAL_TTS_DEFAULT_VOICE,
+    logger: (kind, data) => logLine(kind, data),
+  }));
+}
+const localVoiceKeyLoaded = retryLoad(() => secrets.get(localVoiceConfig().keyName ?? 'local-tts')
+  .then((k) => { if (k) { localVoiceKey = k; configureLocalVoice(); menu(); } })
+  .catch((e) => console.error('local tts key', e.message)));
+// The engine that speaks a reply: the Local DGX voice when configured and keyed, else Fish.
+const voiceEngine = () => (localVoiceReady() && localVoiceKey ? localSpeech : speech);
+
+// A reachability probe against the gateway, so a wrong URL or key is reported when it is saved rather than on
+// the next real reply. It deliberately does NOT generate: these are reasoning models, and a model that isn't
+// resident yet has to be swapped in (minutes, on a box holding a 122b). /v1/models proves the URL and the key,
+// and that the configured model id is actually offered — which is what saving the settings needs to know.
+async function verifyLocal(n = {}) {
+  const key = await secrets.get(n.keyName).catch(() => null);
+  const auth = key ? { Authorization: `Bearer ${key}` } : {};
+  try {
+    const res = await fetch(localModelsUrl(n.baseUrl), { headers: auth, signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      const hint = res.status === 401 || res.status === 403 ? ' — check the virtual key'
+        : res.status === 404 ? ' — is that the /v1 base?' : '';
+      panelNote(`The gateway answered ${res.status}${hint}${detail ? `: ${detail.slice(0, 100)}` : ''}`, true);
+      logLine('local_verify', { ok: false, status: res.status, model: n.model });
+      return false;
+    }
+    const body = await res.json().catch(() => null);
+    const ids = (body?.data ?? []).map((m) => m?.id).filter(Boolean);
+    logLine('local_verify', { ok: true, model: n.model, offered: ids.length });
+    // The model list is authoritative here: a key scoped to other models will 403 on the first real request, so
+    // catch that at save time instead.
+    if (ids.length && !ids.includes(n.model)) {
+      panelNote(`That key doesn't offer ${n.model}. It can use: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? '…' : ''}`, true);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    const timedOut = /timeout|abort/i.test(String(e?.message ?? ''));
+    panelNote(timedOut
+      ? `No answer from ${new URL(n.baseUrl).host} in 20s. Is the gateway up?`
+      : `Could not reach the gateway: ${String(e?.message ?? e).slice(0, 110)}`, true);
+    logLine('local_verify', { ok: false, error: String(e?.message ?? e).slice(0, 200) });
+    return false;
+  }
+}
+
+// One short synthesis against the TTS server, so a wrong URL or key surfaces at save time. The audio is
+// discarded — this only asks whether the server will speak.
+async function verifyLocalVoice() {
+  const c = localVoiceConfig();
+  try {
+    const t = createSpeechTransport({
+      baseURL: localSpeechUrl(c.baseUrl),
+      apiKey: localVoiceKey,
+      model: c.model ?? LOCAL_TTS_DEFAULT_MODEL,
+      voice: c.voice ?? LOCAL_TTS_DEFAULT_VOICE,
+      timeoutMs: 180_000, // the first call after a cold start loads the model (~35 s on the DGX)
+    });
+    const bytes = await t('OK.').onChunk;
+    logLine('local_voice_verify', { ok: true, bytes: bytes?.length ?? 0 });
+    if (!bytes?.length) { panelNote('The voice server answered with no audio.', true); return false; }
+    return true;
+  } catch (e) {
+    panelNote(`The voice server failed: ${String(e?.message ?? e).slice(0, 140)}`, true);
+    logLine('local_voice_verify', { ok: false, error: String(e?.message ?? e).slice(0, 200) });
+    return false;
+  }
+}
+// Every reply needs its own speech id so audio from a stopped reply can never play over the next one, exactly as
+// Fish guarantees. The id is minted here and handed to the overlay on the first chunk.
+const startVoice = () => {
+  const engine = voiceEngine();
+  if (engine === localSpeech) localSpeechId = `lv${++localSpeechSeq}`;
+  else localSpeechId = null;
+  return engine.start();
+};
+
 // ---------- shortcuts ----------
 const MOD_ORDER = ['control', 'option', 'shift', 'command'];
 const MOD_SYMBOL = { control: '⌃', option: '⌥', shift: '⇧', command: '⌘' };
@@ -183,8 +304,23 @@ async function refreshAuth() {
 // Some models run on only one kind of key (Kimi K2.8 Preview on a Kimi Code plan key, MiMo UltraSpeed on API Credits).
 const canRun = (p, id) => !!signedIn.get(p) && getAuthStorageKeys(p, id).some((k) => k === p || storedKeys.has(k));
 const runnable = (p) => getModelsForProvider(p).filter((m) => canRun(p, m.id));
+// Local model metadata: gg-core has no catalog entry for a gateway model, so the panel's context window (or the
+// saved default) stands in. These wrap getModel/getContextWindow so every existing call site keeps working.
+const localModelFor = (m, provider = config.provider) => localModel(provider, m, config.local?.context);
+// The model id any request actually runs on: the Local gateway's model when Local is on (config.model belongs to
+// the cloud providers and stays untouched, so switching back to a cloud model just works), else config.model.
+const effectiveModel = () => {
+  if (isLocalEnabled(config.local)) { const n = normalizeLocal(config.local); if (n?.model) return n.model; }
+  return config.model;
+};
+const effectiveProvider = () => (isLocalEnabled(config.local) ? LOCAL_PROVIDER_ID : config.provider);
+const modelMeta = (m, provider = config.provider) => getModel(m) ?? localModelFor(m, provider);
+const contextWindowOf = (m, provider = config.provider) =>
+  getContextWindow(m, { provider }) || localModelFor(m, provider)?.contextWindow || 0;
 function ensureModel() {
-  if (config.provider && getModel(config.model) && canRun(config.provider, config.model)) return true;
+  // Local needs no sign-in: a URL and a model id in config is all it takes.
+  if (isLocalEnabled(config.local) && normalizeLocal(config.local)?.model) return true;
+  if (config.provider && modelMeta(config.model) && canRun(config.provider, config.model)) return true;
   const p = ['anthropic', 'openai', 'gemini', ...MENU_PROVIDERS].find((x) => runnable(x).length);
   if (!p) return false;
   config.provider = p;
@@ -298,7 +434,7 @@ function anim(name, args = {}) {
 // Tools that take long enough to need a spoken beat first (a web search runs on the provider's side).
 const SLOW_TOOLS = new Set(['fetch_url', 'take_screenshot', 'read_window', 'act_in_app', 'run_command', 'search_files', 'list_windows']);
 // How replies are written: for bubbles (text only), or for the ear (spoken with Fish Audio, details on screen).
-const VOICE_ON = () => config.replies === 'voice' && speech.on;
+const VOICE_ON = () => config.replies === 'voice' && (speech.on || (localVoiceReady() && !!localVoiceKey));
 const replyStyle = () => (VOICE_ON() ? VOICE_STYLE : TEXT_STYLE);
 const TEXT_STYLE = `You talk through small speech bubbles, so keep replies short: one to three sentences unless asked for detail. Light markdown shows properly (**bold** for the key word, \`code\` for commands and file names, [links](https://…)), but skip headings and tables in a bubble, and never narrate actions like *waves*. One exception: when you search the web or fetch a page, or the answer is genuinely a list, it shows on a card beside you instead of a bubble. Then start with a one-sentence answer, follow with 3 to 6 short points as "- " lines (one fact each, under 20 words), and if you used the web this turn, end with a line "Sources: " and the site names as [name](url) links. Markdown renders on the card (bold, \`code\`, links, headings, tables, code blocks), so use what helps, but no preamble. Everything else stays a short bubble with no "- " lines. An emoji now and then is fine; the bubbles show them. `;
 const VOICE_STYLE = `You talk out loud: what you write is spoken in your voice and shown in a small bubble, so write for the ear. Say one to three short sentences, the way you'd talk to a friend: plain words, contractions, about 6 to 20 words each. What you say has no markdown, emoji, links, file paths or code; name the site, file or app instead. Say numbers, times and money the way people say them. Anything to read rather than hear goes below what you say and is never read out: "- " lines for points, options or steps (3 to 6, one fact each, under 20 words), "> " lines for a draft they'll send or copy (an email, message or post), and a \`\`\` block for code. What they asked to hear (a story, a joke, an explanation, advice) is spoken, not put on screen: say it, short (a story in 4 to 6 sentences). An answer from the web is said like any other: a quick fact (a score, a date, the weather, who someone is) is just your sentences, no points and no sources. Only when the answer is genuinely a list, steps or a breakdown that's easier to read than hear, say it in one or two sentences, then the "- " points, then, if you used the web, a line "Sources: " with the site names as [name](url) links: those show on a card beside you and only your sentences are spoken. Never say "here's a list" or read out what's on screen; a few words pointing to it are enough ("the steps are on screen").
@@ -415,7 +551,7 @@ const resumed = loadLatestSession().then((s) => { if (s && !session) session = s
 const BUDGET_CAP = 120_000;
 // Tokens per request: kept tight for a quick reply out loud. The ChatGPT plan has its own windows (accountId).
 let credsAccountId;
-const requestBudget = () => Math.min(BUDGET_CAP, getContextWindow(config.model, { provider: config.provider, ...(agentRoute === 'api' && credsAccountId ? { accountId: credsAccountId } : {}) }) * 0.5);
+const requestBudget = () => Math.min(BUDGET_CAP, (getContextWindow(config.model, { provider: config.provider, ...(agentRoute === 'api' && credsAccountId ? { accountId: credsAccountId } : {}) }) || localModelFor(config.model)?.contextWindow || 8192) * 0.5);
 // Claude Code's session for this conversation, so a rebuilt agent continues it instead of starting over.
 let ccResume = null;
 // The Claude Code process when Anthropic is signed in with Claude (else null: the API, with a key or another provider).
@@ -429,13 +565,17 @@ let agentRoute = null;
 // The chat's thinking level (null: off); side calls never think harder than this.
 const CHAT_THINKING = process.env.ROAMIES_THINKING === 'off' ? null : process.env.ROAMIES_THINKING || 'low';
 function makeAgent(cc) {
-  const m = getModel(config.model);
+  const local = isLocalEnabled(config.local) ? normalizeLocal(config.local) : null;
+  // Local runs on its own model id; a cloud provider keeps config.model untouched so switching back is lossless.
+  const modelId = local?.model ?? config.model;
+  const providerId = local ? LOCAL_PROVIDER_ID : config.provider;
+  const m = modelMeta(modelId, providerId);
   controller = new AbortController();
-  const prior = forProvider(session?.messages ?? [], session?.provider, config.provider);
-  if (session) { session.provider = config.provider; session.model = config.model; }
-  agentRoute = cc ? 'claude-code' : 'api';
+  const prior = forProvider(session?.messages ?? [], session?.provider, providerId);
+  if (session) { session.provider = providerId; session.model = modelId; }
+  agentRoute = cc ? 'claude-code' : local ? 'local' : 'api';
   const common = {
-    model: config.model,
+    model: modelId,
     system: system(),
     priorMessages: prior,
     tools,
@@ -456,6 +596,23 @@ function makeAgent(cc) {
       ...common, executable: cc.executable, env: cc.env, cwd: HOME, keepWarm: true,
       resume: ccResume?.session === sid ? ccResume.state : null,
       onResume: (state) => { ccResume = { session: sid, state }; },
+    });
+    return;
+  }
+  // The Local gateway (LiteLLM on the DGX or IGX): an OpenAI-compatible server reached by baseUrl, with the
+  // virtual key from the keychain. gg-ai treats provider 'openai' + a custom baseUrl as an unknown compatible
+  // server, so no second provider implementation is needed — only the routing and the key.
+  if (local) {
+    agent = new Agent({
+      ...common,
+      provider: 'openai',
+      baseUrl: local.baseUrl,
+      webSearch: false,           // a local gateway has no provider-side search
+      cacheRetention: undefined,  // prompt caching is an Anthropic concept
+      resolveCredentials: async () => {
+        const key = await secrets.get(local.keyName).catch(() => null);
+        return key ? { apiKey: key } : {};
+      },
     });
     return;
   }
@@ -490,7 +647,7 @@ async function playTour() {
   const t = tourPending;
   if (!t || busy) return;
   tourPending = null;
-  const voice = VOICE_ON() ? speech.start() : null;
+  const voice = VOICE_ON() ? startVoice() : null;
   turnVoice = voice;
   // Like the rest of the app's drawings it can be cleared, and it also goes by itself a while after it's done.
   try { await ink.show(tourBeats(userName, lookName(), t.goal, { mac: MAC }), `tour-${++tours}`, { fade: 45 }); }
@@ -506,7 +663,7 @@ async function playShowcase() {
   endShowcase(null);
   ink.clear(); // a replay starts clean, even while the last one is still fading
   const me = showcase = { id: `showcase-${++showcases}`, watch: null, drawn: false };
-  const voice = VOICE_ON() ? speech.start() : null;
+  const voice = VOICE_ON() ? startVoice() : null;
   turnVoice = voice;
   try { await ink.show(showcaseBeats(userName, lookName()), me.id, { fade: 2.5 }); }
   catch (e) { console.error('showcase', e); if (showcase === me) endShowcase('failed'); }
@@ -517,7 +674,7 @@ function endShowcase(phase) {
   const s = showcase;
   if (!s) return;
   showcase = null; clearInterval(s.watch);
-  if (phase === 'gone' && !s.drawn) speech.stop();
+  if (phase === 'gone' && !s.drawn) { speech.stop(); localSpeech.stop(); }
   if (phase) ob({ kind: 'showcase', phase });
 }
 function showcaseDrawn() {
@@ -561,7 +718,7 @@ const syncSession = () => {
 let lastInput = null; // { session, tokens, measured } from the newest model call
 let compacting = null, pendingFold = null;
 function maybeCompact() {
-  if (compacting || intro || busy || queued || !session?.messages.length || !config.model) return;
+  if (compacting || intro || busy || queued || !session?.messages.length || !effectiveModel()) return;
   const tokens = lastInput?.session === session.id ? lastInput.tokens : 0;
   const trigger = compactTrigger(requestBudget());
   if (tokens < trigger) return;
@@ -598,7 +755,7 @@ function applyPendingFold() {
 // ---------- the memory pass ----------
 // Facts come only from here: what the fold call returns, and a pass over a conversation as it ends.
 async function sideRoute() {
-  return { provider: config.provider, model: config.model, cc: await claudeCodeRoute(), credsFor: (m) => credsFor(config.provider, m), cwd: HOME, chatThinking: CHAT_THINKING };
+  return { provider: effectiveProvider(), model: effectiveModel(), cc: await claudeCodeRoute(), credsFor: (m) => credsFor(config.provider, m), cwd: HOME, chatThinking: CHAT_THINKING };
 }
 async function learnFacts(facts) {
   const added = [];
@@ -611,7 +768,7 @@ async function learnFacts(facts) {
 }
 async function memoryPass(s, why) {
   const turns = transcript(s.messages.filter((m) => !isSummary(m)), userName, stripNote);
-  if (!turns.trim() || !config.model) return [];
+  if (!turns.trim() || !effectiveModel()) return [];
   const t0 = Date.now();
   try {
     const facts = listFacts();
@@ -628,7 +785,7 @@ async function memoryPass(s, why) {
 /** Starts a clean conversation; the one ending gets a memory pass (`why` names it in the log). */
 function freshSession(why) {
   const old = session;
-  session = newSession(config.provider, config.model); liveBlocks.clear(); agent = null; pendingFold = null; lastInput = null; pruneSessions();
+  session = newSession(effectiveProvider(), effectiveModel()); liveBlocks.clear(); agent = null; pendingFold = null; lastInput = null; pruneSessions();
   return why && old?.messages.length ? memoryPass(old, why) : Promise.resolve([]);
 }
 
@@ -689,7 +846,7 @@ async function readyAgent() {
   await fishKeyLoaded;
   await refreshAuth();
   if (!ensureModel()) return `Sign in to an AI provider first: the Model page in ${PANEL}. Then ask me again!`;
-  if (!session) { session = newSession(config.provider, config.model); liveBlocks.clear(); agent = null; pruneSessions(); }
+  if (!session) { session = newSession(effectiveProvider(), effectiveModel()); liveBlocks.clear(); agent = null; pruneSessions(); }
   if (agentStale && agent) { agent = null; }
   agentStale = false;
   let cc;
@@ -721,7 +878,7 @@ async function prompt(text, image = null, note = '', byVoice = false) {
   agent.setSignal(controller.signal);
   ui({ kind: 'agent', e: { type: 'start' } });
   // Voice: the socket opens now, while the model thinks; sentences are spoken as soon as each is ready.
-  const voice = VOICE_ON() ? speech.start() : (speech.stop(), null);
+  const voice = VOICE_ON() ? startVoice() : (voiceEngine().stop(), null);
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
   const spoken = voice && new SpeechText((t) => voice.say(t));
@@ -751,8 +908,8 @@ async function prompt(text, image = null, note = '', byVoice = false) {
       if (beatText.length > 70 || /\n/.test(beatText)) releaseBeat(false); // too long to be a beat
     });
     const turn = nextTurn();
-    logLine('request', { turn, model: config.model, chars: text.length, image: !!image, session: session?.id });
-    const use = { t: Date.now(), model: config.model, calls: 0, tools: 0, in: 0, cacheRead: 0, cacheWrite: 0, out: 0 };
+    logLine('request', { turn, model: effectiveModel(), chars: text.length, image: !!image, session: session?.id });
+    const use = { t: Date.now(), model: effectiveModel(), calls: 0, tools: 0, in: 0, cacheRead: 0, cacheWrite: 0, out: 0 };
     const soon = frontSoon; frontSoon = null;
     frontNow = soon && Date.now() - soon.at < 8000 ? await soon.p : await whereNow();
     const stamped = `[${stampNow()}] ${text}`;
@@ -972,11 +1129,13 @@ function setLook(l) {
 
 async function setReplies(mode) {
   await fishKeyLoaded;
-  if (mode === 'voice' && !speech.on) return fishKeyLogin({ thenVoice: true });
+  // Either engine can speak: a Fish key, or the local DGX voice. Only ask for a Fish key when neither is ready.
+  const localReady = localVoiceReady() && !!localVoiceKey;
+  if (mode === 'voice' && !speech.on && !localReady) return fishKeyLogin({ thenVoice: true });
   if (config.replies === mode) return;
   config.replies = mode; saveConfig();
   agentStale = true; // the spoken and written styles are different prompts
-  if (mode === 'text') speech.stop();
+  if (mode === 'text') { speech.stop(); localSpeech.stop(); }
   menu(); if (onboarding) obState();
   if (mode === 'voice') speakLine('Voice is on. This is how I sound.');
   else say('Text only from now on.', 'happy');
@@ -985,14 +1144,14 @@ async function setReplies(mode) {
 // A line from the app itself (not the model), shown and spoken.
 function speakLine(text, mood = 'happy') {
   say(text, mood);
-  const v = config.replies === 'voice' ? speech.start() : null;
+  const v = config.replies === 'voice' ? startVoice() : null;
   if (v && onboarding) guideVoices.add(v.id); // heard in the setup guide, where it was switched on
   if (v) { v.say(text); v.end(); }
 }
 
 async function removeFishKey() {
   try { await secrets.delete('fish-audio'); } catch { return say(`I couldn't remove the key${MAC ? ' from your Keychain' : ''}. Try again in a moment.`, 'concerned'); }
-  speech.setKey(null); speech.stop();
+  speech.setKey(null); speech.stop(); localSpeech.stop();
   if (config.replies === 'voice') { config.replies = 'text'; saveConfig(); agentStale = true; }
   menu();
   say('Fish Audio key removed. Replies are text only.', 'happy');
@@ -1111,8 +1270,8 @@ async function midnightClean() {
 // ---------- menu ----------
 // The right-click menu: the basics. Everything else (memory, model, settings, updates) is in the panel.
 function menu() {
-  const current = getModel(config.model);
-  const status = busy ? `${lookName()} is working…` : loggingIn ? `Signing in to ${PROVIDER_LABELS[loggingIn]}…` : current ? `${current.name} · ${PROVIDER_LABELS[config.provider] ?? config.provider}` : 'Not signed in';
+  const current = modelMeta(config.model);
+  const status = busy ? `${lookName()} is working…` : loggingIn ? `Signing in to ${PROVIDER_LABELS[loggingIn]}…` : current ? `${current.name} · ${PROVIDER_LABELS[effectiveProvider()] ?? (isLocalEnabled(config.local) ? LOCAL_PROVIDER_LABEL : effectiveProvider())}` : 'Not set up';
   const items = [
     { id: 'status', label: status, enabled: false },
     { sep: true },
@@ -1140,25 +1299,43 @@ function panel() {
 }
 const panelNote = (text, bad = false) => panelOpen && send({ type: 'panel', msg: { kind: 'note', text, bad } });
 function panelState() {
-  const current = getModel(config.model);
+  const current = modelMeta(config.model);
   const doing = activity.doing();
   return {
     version: VERSION, os: MAC ? 'mac' : process.platform === 'win32' ? 'win' : 'other', snap: SNAP_OK,
     status: busy ? { state: 'busy', text: doing ?? 'Thinking' } : loggingIn ? { state: 'busy', text: loginStatus || `Signing in to ${PROVIDER_LABELS[loggingIn]}` } : current ? { state: 'ready', text: 'Ready' } : { state: 'off', text: 'Not signed in' },
     busy, canNew: !busy && !!session?.messages.length,
-    model: current ? { provider: config.provider, id: config.model, name: current.name, providerLabel: PROVIDER_LABELS[config.provider] ?? config.provider } : null,
-    providers: MENU_PROVIDERS.map((p) => {
-      const meta = AUTH_PROVIDERS.find((x) => x.value === p);
-      const on = !!signedIn.get(p);
-      return {
-        id: p, label: PROVIDER_LABELS[p] ?? p, on,
-        method: OAUTH[p] && (!meta || meta.methods.includes('oauth')) ? 'oauth' : meta?.methods?.includes('apikey') ? 'key' : null,
-        key: !!meta?.methods?.includes('apikey'), // also takes an API key (Claude and ChatGPT next to their sign-in)
-        // Kimi and Xiaomi: which kind of key is being added (plan or pay-per-token).
-        kinds: meta && keyKinds(meta).length > 1 ? keyKinds(meta).map(([id, label, billing]) => ({ id, label, billing })) : null,
-        models: on ? runnable(p).slice(0, 24).map((mm) => ({ id: mm.id, name: mm.name })) : [],
-      };
-    }),
+    model: current ? { provider: effectiveProvider(), id: effectiveModel(), name: current.name, providerLabel: PROVIDER_LABELS[effectiveProvider()] ?? (isLocalEnabled(config.local) ? LOCAL_PROVIDER_LABEL : effectiveProvider()) } : null,
+    providers: [
+      localMenuProvider(config.local, isLocalEnabled(config.local)),
+      ...MENU_PROVIDERS.map((p) => {
+        const meta = AUTH_PROVIDERS.find((x) => x.value === p);
+        const on = !!signedIn.get(p);
+        return {
+          id: p, label: PROVIDER_LABELS[p] ?? p, on,
+          method: OAUTH[p] && (!meta || meta.methods.includes('oauth')) ? 'oauth' : meta?.methods?.includes('apikey') ? 'key' : null,
+          key: !!meta?.methods?.includes('apikey'), // also takes an API key (Claude and ChatGPT next to their sign-in)
+          // Kimi and Xiaomi: which kind of key is being added (plan or pay-per-token).
+          kinds: meta && keyKinds(meta).length > 1 ? keyKinds(meta).map(([id, label, billing]) => ({ id, label, billing })) : null,
+          models: on ? runnable(p).slice(0, 24).map((mm) => ({ id: mm.id, name: mm.name })) : [],
+        };
+      }),
+    ],
+    // The Local gateway and Local voice, so the Model and Voice pages can show and edit them.
+    local: {
+      ...(normalizeLocal(config.local) ?? { enabled: false, baseUrl: '', model: null, context: null }),
+      on: isLocalEnabled(config.local),
+      keyName: config.local?.keyName ?? 'local-llm',
+      presets: LOCAL_PRESETS,
+      tts: {
+        enabled: !!config.localVoice?.enabled,
+        baseUrl: config.localVoice?.baseUrl ?? '',
+        model: config.localVoice?.model ?? LOCAL_TTS_DEFAULT_MODEL,
+        voice: config.localVoice?.voice ?? LOCAL_TTS_DEFAULT_VOICE,
+        keyName: config.localVoice?.keyName ?? 'local-tts',
+        on: !!(config.localVoice?.enabled && String(config.localVoice?.baseUrl ?? '').trim()),
+      },
+    },
     loggingIn,
     recent: activity.recent,
     usage: usageToday.requests ? { requests: usageToday.requests, tokens: usageToday.tokens } : null,
@@ -1219,7 +1396,7 @@ const startVoiceDownload = () => {
 };
 const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecognition' };
 function onVoice(m) {
-  if (m.type === 'voice_state' && m.state === 'listening') { interruptQuietly(); speech.stop(); warmUp(); } // talking over it stops it
+  if (m.type === 'voice_state' && m.state === 'listening') { interruptQuietly(); speech.stop(); localSpeech.stop(); warmUp(); } // talking over it stops it
   else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow() };
   else if (m.type === 'voice' && m.text?.trim()) {
     // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
@@ -1248,13 +1425,73 @@ function onVoice(m) {
 
 const overlays = () => send({ type: 'overlays', ids: ['sidekick'] });
 
+// Save the Local gateway from the panel: base URL, model, and an optional virtual key (keychain only). Re-routes
+// the agent on the next request and proves the gateway answers before reporting success.
+async function saveLocal(m) {
+  const preset = typeof m.preset === 'string' ? LOCAL_PRESETS.find((p) => p.id === m.preset) : null;
+  const baseUrl = String(m.baseUrl ?? preset?.baseUrl ?? config.local?.baseUrl ?? '').trim();
+  const modelId = String(m.modelId ?? config.local?.modelId ?? '').trim();
+  const next = {
+    ...(config.local ?? {}),
+    enabled: m.enabled !== false,
+    baseUrl,
+    modelId,
+    context: Number.isFinite(m.context) ? Math.floor(m.context) : (config.local?.context ?? null),
+    keyName: String(m.keyName ?? config.local?.keyName ?? 'local-llm'),
+  };
+  const normalized = normalizeLocal(next);
+  if (!normalized) return panelNote('That gateway URL is not valid. Use http://192.168.2.146:4000/v1.', true);
+  if (!normalized.model) return panelNote('Pick a model first.', true);
+  config.local = next;
+  if (typeof m.key === 'string' && m.key.trim()) {
+    await secrets.set(next.keyName, m.key.trim()).catch((e) => panelNote(`The keychain refused the key: ${e.message}`, true));
+  }
+  saveConfig();
+  agent = null; // the next request rebuilds the agent on the new route
+  logLine('local_config', { baseUrl: normalized.baseUrl, model: normalized.model, on: isLocalEnabled(config.local) });
+  if (isLocalEnabled(config.local) && m.verify !== false) {
+    const ok = await verifyLocal(normalized);
+    if (!ok) return panel();
+  }
+  panelNote(isLocalEnabled(config.local) ? `Local model ready: ${normalized.model} on ${new URL(normalized.baseUrl).host}.` : 'Local model switched off.');
+  panel();
+}
+
+// Save the Local voice (Qwen3-TTS on the DGX) from the panel, then prove it speaks.
+async function saveLocalVoice(m) {
+  const baseUrl = String(m.baseUrl ?? config.localVoice?.baseUrl ?? '').trim();
+  const next = {
+    ...(config.localVoice ?? {}),
+    enabled: m.enabled !== false,
+    baseUrl,
+    model: String(m.model ?? config.localVoice?.model ?? LOCAL_TTS_DEFAULT_MODEL),
+    voice: String(m.voice ?? config.localVoice?.voice ?? LOCAL_TTS_DEFAULT_VOICE),
+    keyName: String(m.keyName ?? config.localVoice?.keyName ?? 'local-tts'),
+  };
+  if (next.enabled && !baseUrl) return panelNote('Set the TTS server URL first, e.g. http://192.168.2.146:8092.', true);
+  config.localVoice = next;
+  if (typeof m.key === 'string' && m.key.trim()) {
+    localVoiceKey = m.key.trim();
+    await secrets.set(next.keyName, localVoiceKey).catch((e) => panelNote(`The keychain refused the key: ${e.message}`, true));
+  }
+  configureLocalVoice();
+  saveConfig();
+  logLine('local_voice_config', { baseUrl, on: localVoiceReady(), keyed: !!localVoiceKey });
+  if (localVoiceReady() && localVoiceKey && m.verify !== false) {
+    const ok = await verifyLocalVoice();
+    if (!ok) return panel();
+  }
+  panelNote(localVoiceReady() && localVoiceKey ? `Local voice ready on ${new URL(baseUrl).host}.` : 'Local voice switched off.');
+  panel();
+}
+
 async function onMenu(id) {
   if (id === 'show') ui({ kind: 'summon', show: true });
   else if (id === 'ask') {
     warmUp();
     const text = await ask({ placeholder: 'Ask me anything…' });
     if (text?.trim()) enqueue(text.trim());
-  } else if (id === 'stop') { const cancelled = busy; endIntro(); controller?.abort(); speech.stop(); ink.stop(cancelled); }
+  } else if (id === 'stop') { const cancelled = busy; endIntro(); controller?.abort(); speech.stop(); localSpeech.stop(); ink.stop(cancelled); }
   else if (id === 'new') {
     endIntro();
     freshSession('new'); menu();
@@ -1277,7 +1514,7 @@ async function onMenu(id) {
   else if (id.startsWith('model:')) {
     const [, p, ...rest] = id.split(':');
     config.provider = p; config.model = rest.join(':'); agent = null; saveConfig(); menu();
-    say(`Switched to ${getModel(config.model)?.name ?? config.model}.`, 'happy');
+    say(`Switched to ${modelMeta(config.model)?.name ?? config.model}.`, 'happy');
   } else if (id.startsWith('login:')) oauthLogin(id.slice(6));
   else if (id.startsWith('key:')) apiKeyLogin(id.slice(4));
   else if (id.startsWith('size:') && SIZES.some(([s]) => s === id.slice(5))) { config.size = id.slice(5); saveConfig(); ui({ kind: 'size', size: config.size }); menu(); }
@@ -1425,7 +1662,7 @@ async function introAnswer(text) {
 
 // ---------- setup guide ----------
 function obState() {
-  const current = getModel(config.model);
+  const current = modelMeta(config.model);
   ob({
     kind: 'state',
     platform: process.platform,
@@ -1477,7 +1714,7 @@ async function onGuide(m) {
   else if (m.type === 'chat_forget' && typeof m.id === 'string') { await forgetFact(m.id); ob({ kind: 'chat_facts', facts: introFacts() }); menu(); }
   else if (m.type === 'ob_step') { config.onboardStep = Math.max(0, Math.min(7, m.step | 0)); saveConfig(); }
   // Voice needs a working key first: without one, the guide asks for it (ob_fishkey) instead.
-  else if (m.type === 'ob_replies' && (m.mode === 'text' || (m.mode === 'voice' && speech.on))) { await fishKeyLoaded; await setReplies(m.mode); }
+  else if (m.type === 'ob_replies' && (m.mode === 'text' || (m.mode === 'voice' && (speech.on || (localVoiceReady() && !!localVoiceKey))))) { await fishKeyLoaded; await setReplies(m.mode); }
   else if (m.type === 'ob_fishkey' && typeof m.key === 'string') {
     const note = (text, bad) => ob({ kind: 'fish', ok: !bad, error: bad ? text : null });
     await fishKeyLogin({ given: m.key.slice(0, 1000), thenVoice: true, note }).catch((e) => note(`Couldn't save the key: ${String(e?.message ?? e).slice(0, 80)}`, true));
@@ -1526,6 +1763,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     apiKeyLogin(id, m.key.slice(0, 1000)).then(() => panelNote(signedIn.get(m.provider) ? `${label} is connected.` : `That ${label} key didn't work.`, !signedIn.get(m.provider)))
       .catch((e) => panelNote(`That ${label} key didn't work: ${String(e?.message ?? e).slice(0, 80)}`, true));
   } else if (m.type === 'panel_fishkey' && typeof m.key === 'string') fishKeyLogin({ given: m.key.slice(0, 1000), note: panelNote }).catch((e) => console.error('fish key', e));
+  else if (m.type === 'panel_local') saveLocal(m).catch((e) => console.error('panel_local', e));
+  else if (m.type === 'panel_localvoice') saveLocalVoice(m).catch((e) => console.error('panel_localvoice', e));
+  // The Local gateway: a base URL, a model and an optional virtual key. Saving re-routes makeAgent on the next
+  // request; the key goes to the keychain, never into config.
   else if (m.type === 'answer') { pending.get(m.id)?.(m.text ?? null); pending.delete(m.id); }
   else if (m.type === 'ui_ready') {
     retired.then((notes) => { if (notes.length) { retired = Promise.resolve([]); say(`${notes.join(' ')} Do it on the Model page in ${PANEL}.`, 'concerned'); } });
@@ -1613,7 +1854,7 @@ menu();
 overlays();
 sendKeys();
 send({ type: 'login_item' });
-logLine('start', { version: VERSION, platform: process.platform, model: config.model });
+logLine('start', { version: VERSION, platform: process.platform, model: effectiveModel() });
 pruneLogs(); pruneUsage();
 midnightClean();
 // Look for updates shortly after launch, then every 6 hours.

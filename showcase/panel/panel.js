@@ -338,7 +338,8 @@
         on.map((p) => el('optgroup', { label: p.label }, p.models.map((m) => el('option', { value: `${p.id}:${m.id}`, textContent: m.name, selected: `${p.id}:${m.id}` === model })))))) : null;
     return [
       group('Model', 'Which AI answers you.', null,
-        select ?? el('p', { className: 'empty', textContent: 'Sign in to an account below first.' })),
+        select ?? el('p', { className: 'empty', textContent: 'Sign in to an account below, or set up a local gateway.' })),
+      localGroup(),
       group('Accounts', 'Sign in to use their models.', null,
         el('div', { className: 'group' }, state.providers.filter((p) => p.on || p.method).map((p) => [
           el('div', { className: 'setting' },
@@ -351,6 +352,69 @@
         ]).flat())),
     ];
   }
+  // The Local gateway (LiteLLM on the user's own DGX or IGX): a base URL, a model and an optional virtual key.
+  // Offered as presets so the two boxes are one click, with the URL and model still editable.
+  function localGroup() {
+    const L = state.local;
+    if (!L) return null;
+    const presets = L.presets ?? [];
+    const matched = presets.find((p) => p.baseUrl === L.baseUrl);
+    const urlInput = el('input', { type: 'url', id: 'local-url', autocomplete: 'off', spellcheck: false,
+      placeholder: 'http://192.168.2.146:4000/v1', value: L.baseUrl ?? '', 'aria-label': 'Local gateway URL' });
+    const modelInput = el('input', { type: 'text', id: 'local-model', autocomplete: 'off', spellcheck: false,
+      placeholder: 'qwen3:4b', value: L.model ?? '', 'aria-label': 'Local model id' });
+    const keyInput = el('input', { type: 'password', id: 'local-key', autocomplete: 'off', spellcheck: false,
+      placeholder: 'sk-… (optional)', 'aria-label': 'Local gateway API key', maxLength: 1000 });
+    const save = () => send({ type: 'panel_local', enabled: true, baseUrl: urlInput.value.trim(),
+      modelId: modelInput.value.trim(), key: keyInput.value.trim(), context: L.context ?? null });
+    const row = el('div', { className: 'keyform' },
+      el('span', { className: 'px field' }, urlInput),
+      el('span', { className: 'px field' }, modelInput),
+      el('span', { className: 'px field' }, keyInput),
+      btn('Save', save, { k: 'save:local' }));
+    return group('Local model', 'Your own DGX or IGX, no cloud account.', null,
+      el('div', { className: 'group' },
+        presets.length ? picks('Gateway', presets.map((p) => [p.id, p.label]), matched?.id ?? '', (id) => {
+          const p = presets.find((x) => x.id === id);
+          if (p) send({ type: 'panel_local', enabled: true, baseUrl: p.baseUrl,
+            modelId: p.models[0] ?? modelInput.value.trim(), context: L.context ?? null });
+        }, 'local-preset', Object.fromEntries(presets.map((p) => [p.id, p.baseUrl]))) : null,
+        el('div', { className: 'setting' },
+          el('span', {}, 'Gateway', el('small', { textContent: L.on ? `On · ${L.model ?? ''}` : 'Off' })),
+          L.on ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'Ready')
+            : el('span', { className: 'muted', textContent: 'Not set up' })),
+        row,
+        L.on && matched?.models?.length ? picks('Model', matched.models.map((x) => [x, x]), L.model, (x) => {
+          send({ type: 'panel_local', enabled: true, baseUrl: L.baseUrl, modelId: x, context: L.context ?? null });
+        }, 'local-model-pick') : null,
+        L.on ? el('div', { className: 'setting' }, el('span', {}, 'Turn off'),
+          link('Disable', () => send({ type: 'panel_local', enabled: false, baseUrl: L.baseUrl, modelId: L.model, verify: false }), { k: 'local-off', aria: 'Turn the local model off' })) : null));
+  }
+
+  // The Local voice (Qwen3-TTS on the DGX): its own host and port, its own key.
+  function localVoiceGroup() {
+    const t = state.local?.tts;
+    if (!t) return null;
+    const urlInput = el('input', { type: 'url', autocomplete: 'off', spellcheck: false,
+      placeholder: 'http://192.168.2.146:8092', value: t.baseUrl ?? '', 'aria-label': 'Local voice server URL' });
+    const keyInput = el('input', { type: 'password', autocomplete: 'off', spellcheck: false,
+      placeholder: 'media API key', 'aria-label': 'Local voice API key', maxLength: 1000 });
+    const save = () => send({ type: 'panel_localvoice', enabled: true, baseUrl: urlInput.value.trim(),
+      model: t.model, voice: t.voice, key: keyInput.value.trim() });
+    return group('Local voice', 'Spoken replies from your own DGX, no Fish Audio key.', null,
+      el('div', { className: 'group' },
+        el('div', { className: 'setting' },
+          el('span', {}, 'Qwen3-TTS', el('small', { textContent: t.on ? `On · ${t.voice}` : 'Off' })),
+          t.on ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'Ready')
+            : el('span', { className: 'muted', textContent: 'Not set up' })),
+        el('div', { className: 'keyform' },
+          el('span', { className: 'px field' }, urlInput),
+          el('span', { className: 'px field' }, keyInput),
+          btn('Save', save, { k: 'save:localvoice' })),
+        t.on ? el('div', { className: 'setting' }, el('span', {}, 'Turn off'),
+          link('Disable', () => send({ type: 'panel_localvoice', enabled: false, baseUrl: t.baseUrl, model: t.model, voice: t.voice, verify: false }), { k: 'localvoice-off', aria: 'Turn the local voice off' })) : null));
+  }
+
   function appearancePage() {
     return [
       group('Look', 'Each look has its own name and voice.', null, lookTiles()),
@@ -389,10 +453,10 @@
     return [
       group('Spoken replies', 'Hear me as well as read me.', null,
         picks('Replies', [['text', 'Text only'], ['voice', 'Voice and text']], state.replies, (x) => {
-          if (x === 'voice' && !state.fishKey) { ui.key = 'fish'; render('key-fish'); note('Add a Fish Audio key to hear me talk.'); return; }
+          if (x === 'voice' && !state.fishKey && !state.local?.tts?.on) { ui.key = 'fish'; render('key-fish'); note('Add a Fish Audio key, or set up the local voice below, to hear me talk.'); return; }
           act(`replies:${x}`);
         }, 'replies'),
-        state.replies === 'voice' && state.fishModels?.length ? [
+        state.replies === 'voice' && state.fishModels?.length && !state.local?.tts?.on ? [
           el('p', { className: 'sub', textContent: 'Voice model' }),
           picks('Voice model', state.fishModels.map((c) => [c.id, c.name]), state.fishModel, (x) => act(`fishmodel:${x}`), 'fishmodel',
             Object.fromEntries(state.fishModels.map((c) => [c.id, `${WHY_LONG[c.id] ?? ''} ${price(c)}`.trim()]))),
@@ -405,6 +469,7 @@
             state.fishKey && ui.key !== 'fish' ? armed('Remove', 'Confirm', 'fishkey-remove', 'fishkey_remove', 'Remove the Fish Audio key') : null)),
         keyForm('fish', 'Fish Audio', (key) => send({ type: 'panel_fishkey', key })),
         v ? toggle('Auto-listen', v.on ? 'Open the mic when I end on a question' : 'Needs Voice control on', v.autoListen, () => act('autolisten'), 'autolisten') : null),
+      localVoiceGroup(),
       v ? group('Talking to me', 'Speak instead of typing.', null,
         toggle('Voice control', v.download
           ? (v.download.status === 'downloading' ? `Downloading the voice model… ${v.download.pct}%` : v.download.status === 'error' ? 'The download failed' : `Needs a ${v.download.size} download`)
