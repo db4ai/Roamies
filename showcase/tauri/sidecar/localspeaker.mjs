@@ -178,6 +178,10 @@ export const createLocalVoice = ({
       state.pending = 0;
       const stopper = makeStopper();
       let ended = false;
+      // Sentences are synthesised ONE AT A TIME, in order. Fetching them concurrently and playing whatever
+      // arrives first is what made the voice start mid-sentence: a short second sentence would overtake a slow
+      // first one. The queue also keeps only one request on the TTS server, which serialises anyway.
+      let queue = Promise.resolve();
       // end() only fires once the last sentence's audio has been fetched, so a short reply isn't clipped by the
       // reply's end arriving before its audio does.
       const finishIfIdle = () => {
@@ -194,7 +198,10 @@ export const createLocalVoice = ({
           state.said.push(text);
           for (const piece of state.sentenceSplit ? splitSentences(text) : [text]) {
             state.pending++;
-            playOne(piece, stopper).then(() => { state.pending--; finishIfIdle(); });
+            queue = queue.then(() => {
+              if (state.stopped) { state.pending--; return; }
+              return playOne(piece, stopper).then(() => { state.pending--; finishIfIdle(); });
+            });
           }
         },
         /** Something slow is starting. The DGX has no pre-recorded beats, so the reply just stays quiet. */

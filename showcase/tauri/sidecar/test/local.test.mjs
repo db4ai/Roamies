@@ -339,6 +339,36 @@ test('createLocalVoice: setTransport swaps the transport, so a saved edit takes 
   assert.equal(got[0], 6);
 });
 
+test('createLocalVoice: sentences are synthesised and played IN ORDER, even when a later one is faster', async () => {
+  const played = [];
+  const wavTag = (tag) => {
+    const n = 60, data = Buffer.alloc(n * 2);
+    for (let i = 0; i < n; i++) data.writeInt16LE(tag, i * 2);
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVE', 8);
+    h.write('fmt ', 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+    h.writeUInt32LE(24000, 24); h.writeUInt32LE(48000, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+    h.write('data', 36); h.writeUInt32LE(data.length, 40);
+    return Buffer.concat([h, data]);
+  };
+  const v = createLocalVoice({
+    baseURL: 'http://h:8092/v1/audio/speech',
+    // The first sentence is slow and the second fast, which is exactly what used to make audio start mid-voice.
+    transport: (text) => {
+      const tag = text.includes('FIRST') ? 1 : 2;
+      return { onChunk: new Promise((r) => setTimeout(() => r(wavTag(tag)), tag === 1 ? 120 : 10)) };
+    },
+    onAudio: (pcm) => played.push((pcm[0] | (pcm[1] << 8)) === 1 ? 'FIRST' : 'SECOND'),
+    onEnd: () => played.push('END'),
+  });
+  const t = v.start();
+  t.say('FIRST sentence.');
+  t.say('SECOND sentence.');
+  t.end();
+  await new Promise((r) => setTimeout(r, 400));
+  assert.deepEqual(played, ['FIRST', 'SECOND', 'END']);
+});
+
 test('createLocalVoice: a transport that throws reports onError, not an exception', async () => {
   let err = null;
   const v = createLocalVoice({
