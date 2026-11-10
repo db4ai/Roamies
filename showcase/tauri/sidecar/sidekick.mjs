@@ -1299,11 +1299,12 @@ function panel() {
 }
 const panelNote = (text, bad = false) => panelOpen && send({ type: 'panel', msg: { kind: 'note', text, bad } });
 // While the setup guide is open it's the visible surface, so a Local save must report there too (the panel may
-// not have been opened at all yet).
-const noteAnywhere = (text, bad = false) => {
-  if (onboarding) ob({ kind: 'local_note', text, bad });
+// not have been opened at all yet). `kind` picks which guide control shows it: the AI step or the replies step.
+const noteAnywhere = (text, bad = false, kind = 'local_note') => {
+  if (onboarding) ob({ kind, text, bad });
   else panelNote(text, bad);
 };
+const voiceNote = (text, bad = false) => noteAnywhere(text, bad, 'local_voice_note');
 function panelState() {
   const current = modelMeta(config.model);
   const doing = activity.doing();
@@ -1475,21 +1476,27 @@ async function saveLocalVoice(m) {
     voice: String(m.voice ?? config.localVoice?.voice ?? LOCAL_TTS_DEFAULT_VOICE),
     keyName: String(m.keyName ?? config.localVoice?.keyName ?? 'local-tts'),
   };
-  if (next.enabled && !baseUrl) return noteAnywhere('Set the TTS server URL first, e.g. http://192.168.2.146:8092.', true);
+  if (next.enabled && !baseUrl) return voiceNote('Set the TTS server URL first, e.g. http://192.168.2.146:8092.', true);
   config.localVoice = next;
   if (typeof m.key === 'string' && m.key.trim()) {
     localVoiceKey = m.key.trim();
-    await secrets.set(next.keyName, localVoiceKey).catch((e) => noteAnywhere(`The keychain refused the key: ${e.message}`, true));
+    await secrets.set(next.keyName, localVoiceKey).catch((e) => voiceNote(`The keychain refused the key: ${e.message}`, true));
   }
   configureLocalVoice();
   saveConfig();
   logLine('local_voice_config', { baseUrl, on: localVoiceReady(), keyed: !!localVoiceKey });
   if (localVoiceReady() && localVoiceKey && m.verify !== false) {
     const ok = await verifyLocalVoice();
-    if (!ok) return panel();
+    if (!ok) { panel(); if (onboarding) obState(); return; }
   }
-  noteAnywhere(localVoiceReady() && localVoiceKey ? `Local voice ready on ${new URL(baseUrl).host}.` : 'Local voice switched off.');
+  voiceNote(localVoiceReady() && localVoiceKey ? `Local voice ready on ${new URL(baseUrl).host}.` : 'Local voice switched off.');
+  // Picking a voice means wanting to hear replies, not just configuring a server: turn speech on and say hello,
+  // so the guide can move on without also visiting the panel.
+  if (localVoiceReady() && localVoiceKey && m.speak !== false && config.replies !== 'voice') {
+    await setReplies('voice').catch(() => {});
+  }
   panel();
+  if (onboarding) obState();
 }
 
 async function onMenu(id) {
@@ -1696,6 +1703,15 @@ function obState() {
       baseUrl: normalizeLocal(config.local)?.baseUrl ?? '',
       model: normalizeLocal(config.local)?.model ?? null,
       presets: LOCAL_PRESETS,
+      // The local voice, so the guide's replies step can offer speaking without a Fish Audio account.
+      tts: {
+        on: localVoiceReady() && !!localVoiceKey,
+        enabled: !!config.localVoice?.enabled,
+        baseUrl: config.localVoice?.baseUrl ?? '',
+        model: config.localVoice?.model ?? LOCAL_TTS_DEFAULT_MODEL,
+        voice: config.localVoice?.voice ?? LOCAL_TTS_DEFAULT_VOICE,
+      },
+      ttsDefaultUrl: 'http://192.168.2.146:8092',
     },
   });
 }
