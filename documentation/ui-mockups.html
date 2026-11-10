@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roamies — Local Model + Local Voice mockups</title>
+<style>
+  :root {
+    --bg: #0d1014; --panel: #141922; --panel-2: #1b2230; --line: #263144;
+    --ink: #e9edf4; --muted: #8ea0bd; --accent: #78ffe2; --accent-ink: #0a2a24;
+    --warn: #ffb454; --bad: #ff6b6b; --good: #7ee68a; --radius: 16px;
+  }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    padding: 32px 24px 80px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.5px; }
+  .sub { color: var(--muted); margin: 0 0 30px; }
+  .grid { display: grid; grid-template-columns: 360px 1fr; gap: 34px; align-items: start; }
+  @media (max-width: 900px){ .grid { grid-template-columns: 1fr; } }
+
+  /* Panel mock (Rust shell → panel protocol) */
+  .panel {
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,.4);
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+    border-bottom: 1px solid var(--line); font-weight: 600;
+  }
+  .panel-head .dot { width: 12px; height: 12px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+  .tabs { display: flex; gap: 4px; padding: 10px 14px 0; }
+  .tab { font-size: 12px; color: var(--muted); padding: 6px 10px; border-radius: 8px; }
+  .tab.active { color: var(--ink); background: var(--panel); }
+  .body { padding: 16px; }
+  .block { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .block h3 { margin: 0 0 4px; font-size: 15px; }
+  .block p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 9px 6px; border-radius: 8px; font-size: 13.5px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row .label { display: flex; align-items: center; gap: 10px; }
+  .row .label .name strong { display: block; font-size: 14px; }
+  .row .label .name span { color: var(--muted); font-size: 12px; }
+  .pill { font-size: 10.5px; padding: 3px 8px; border-radius: 999px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .pill.online { background: rgba(126,230,138,.15); color: var(--good); }
+  .pill.off { background: rgba(142,160,189,.14); color: var(--muted); }
+  .pill.new { background: rgba(120,255,226,.12); color: var(--accent); }
+  .swatch { width: 22px; height: 22px; border-radius: 7px; border: 1px solid var(--line);
+    background: radial-gradient(circle at 35% 30%, var(--accent), #123a34); }
+  .toggle { width: 38px; height: 22px; border-radius: 999px; background: var(--panel-2);
+    border: 1px solid var(--line); position: relative; }
+  .toggle .knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: var(--muted); transition: .15s; }
+  .toggle.on { background: rgba(120,255,226,.3); border-color: var(--accent); }
+  .toggle.on .knob { left: 18px; background: var(--accent); }
+  .field { display: flex; flex-direction: column; gap: 5px; margin: 6px 0 10px; }
+  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .field input, .field select {
+    background: #0c1016; border: 1px solid var(--line); border-radius: 9px;
+    color: var(--ink); padding: 9px 11px; font-size: 13.5px; font-family: inherit; }
+  .field input::placeholder { color: #556; }
+  .btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 9px; padding: 8px 12px; font-size: 12.5px; cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .test { font-size: 13px; }
+
+  .col { display: flex; flex-direction: column; gap: 26px; }
+  .note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 10px; padding: 14px 16px; font-size: 13.5px; }
+  .note b { color: var(--ink); } .note li { margin: 3px 0; }
+  .tag { display: inline-block; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 7px; padding: 1px 8px; font-size: 12px; color: var(--accent); margin: 0 3px 3px 0; }
+  section.head { margin-bottom: 10px; }
+  section.head h2 { font-size: 19px; margin: 0 0 2px; }
+  section.head .k { color: var(--muted); font-size: 13px; margin: 0; }
+  code.k { background: #0c1016; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 12.5px; color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Roamies — Local Model &amp; Local Voice</h1>
+  <p class="sub">Two new sections in the menu-bar panel. The existing cloud sign-ins and Fish Audio stay fully working when the local options are off.</p>
+
+  <!-- ============ SLICE A ============ -->
+  <section class="head" style="margin-top:14px">
+    <h2>Slice A — Model page: “Local / Light LLM”</h2>
+    <p class="k">New <b>Local</b> row in the provider list + config block. OpenAI-compatible gateway.</p>
+  </section>
+
+  <div class="grid">
+    <!-- The panel -->
+    <div>
+      <div class="panel">
+        <div class="panel-head"><span class="dot"></span> Roamies</div>
+        <div class="tabs"><span class="tab">Home</span><span class="tab active">Model</span><span class="tab">Appearance</span><span class="tab">Voice</span><span class="tab">Behavior</span></div>
+        <div class="body">
+          <div class="block">
+            <h3>AI brain</h3>
+            <p>Pick where replies come from. Cloud sign-ins need an account or key.</p>
+            <div class="row"><div class="label"><div class="swatch"></div><div class="name"><strong>Claude</strong><span>Anthropic</span></div></div><span class="pill off">signed out</span></div>
+            <div class="row"><div class="label"><div class="swatch"></div><div class="name"><strong>ChatGPT</strong><span>OpenAI plan / key</span></div></div><span class="pill off">signed out</span></div>
+            <div class="row"><div class="label"><div class="swatch"></div><div class="name"><strong>Gemini</strong><span>API key</span></div></div><span class="pill off">no key</span></div>
+            <!-- the new row -->
+            <div class="row">
+              <div class="label"><div class="swatch" style="background:radial-gradient(circle at 35% 30%, #ffb454, #4a2c0a)"></div>
+                <div class="name"><strong>Local · Light LLM</strong><span>Your DGX / IGX gateway</span></div></div>
+              <span class="toggle on" title="Local active"><span class="knob"></span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- The config dialog that the row expands to -->
+    <div class="col">
+      <div class="note">
+        <b>What this adds</b>
+        <ul style="margin:8px 0 0;padding-left:18px">
+          <li>One provider entry, <span class="tag">local</span>, listed as <b>“Local · Light LLM”</b> — kept out of the cloud sign-in verbs.</li>
+          <li>Connect to your OpenAI-compatible gateway with a base URL and an <b>optional</b> API key (empty = keyless; no header sent).</li>
+          <li>Model + context window picked in the panel; falls back to a small local registry if your gateway doesn't report <code class="k">/models</code>.</li>
+          <li>Key stored in the macOS Keychain like the Fish key; <strong>no key is typed into logs or config</strong>.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><span class="dot" style="background:#ffb454;box-shadow:0 0 12px #ffb454"></span> Local · Light LLM</div>
+        <div class="body">
+          <div class="field">
+            <label>Gateway base URL</label>
+            <input placeholder="http://192.168.1.22:11434/v1" value="http://roamies-dgx:8000/v1">
+          </div>
+          <div class="field">
+            <label>Model</label>
+            <select>
+              <option selected>light-llm / gemma-3-4b (auto)</option>
+              <option>light-llm / gemma-3-4b (manual)</option>
+              <option>light-llm / qwen2.5-7b</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>API key (optional — leave blank if your gateway doesn't need one)</label>
+            <input type="password" placeholder="Blank is fine for a keyless gateway">
+          </div>
+          <div class="actions">
+            <button class="btn primary">Connect</button>
+            <button class="btn">Test connection</button>
+          </div>
+          <div class="foot test">✓ Connected. The Light LLM gateway answered with <span style="color:var(--good)">200</span> in 6 ms.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SLICE B ============ -->
+  <section class="head" style="margin-top:52px">
+    <h2>Slice B — Voice page: “Local voice”</h2>
+    <p class="k">Toggle spoken replies to a local TTS service on the DGX/IGX instead of Fish Audio. Listening stays on Apple speech recognition (already local, free).</p>
+  </section>
+
+  <div class="grid">
+    <div>
+      <div class="panel">
+        <div class="panel-head"><span class="dot"></span> Roamies</div>
+        <div class="tabs"><span class="tab">Home</span><span class="tab">Model</span><span class="tab">Appearance</span><span class="tab active">Voice</span><span class="tab">Behavior</span></div>
+        <div class="body">
+          <div class="block">
+            <h3>Spoken replies</h3>
+            <p>Who speaks my answers out loud when you hold the keys.</p>
+            <div class="row">
+              <div class="label"><div class="swatch"></div><div class="name"><strong>Fish Audio</strong><span>Cloud · needs your key &amp; credit</span></div></div>
+              <span class="pill off">off</span>
+            </div>
+            <!-- the new row -->
+            <div class="row">
+              <div class="label"><div class="swatch" style="background:radial-gradient(circle at 35% 30%, #78ffe2, #113)"></div>
+                <div class="name"><strong>Local voice</strong><span>DGX / IGX · no key · no cost</span></div></div>
+              <span class="toggle on"><span class="knob"></span></span>
+            </div>
+          </div>
+          <div class="block">
+            <h3>Local voice model</h3>
+            <p>From the TTS service already running on your DGX.</p>
+            <div class="row"><div class="label"><div class="swatch"></div><div class="name"><strong>parakeet-tdt (local)</strong><span>connected · 9 ms</span></div></div><span class="pill online">ready</span></div>
+          </div>
+          <div class="block">
+            <h3>Listening (speech recognition)</h3>
+            <p>How I hear you.</p>
+            <div class="row"><div class="label"><div class="swatch"></div><div class="name"><strong>On-device</strong><span>Apple speech recognition · local</span></div></div><span class="pill online">local</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="note">
+        <b>The payoff</b>
+        <ul style="margin:8px 0 0;padding-left:18px">
+          <li>Spoken replies come from <b>your TTS service</b>, not Fish Audio — no signup, no API key, no per-token bill.</li>
+          <li>Everything after the panel stays identical: the reply streams, gets split into sentences, and is played through the <b>existing audio path</b>. Local vs Fish is a swappable transport, same <code class="k">emit({ kind:'speech', pcm })</code>.</li>
+          <li>If the TTS server is unreachable, spoken replies safely fall back to <b>text</b> — never an error, never a crash.</li>
+          <li>Listening never changes — it already runs on-device. No new microphone permissions.</li>
+        </ul>
+      </div>
+
+      <!-- config: optional key, url, model; the real endpoint is discovered on the DGX in Slice B -->
+      <div class="panel">
+        <div class="panel-head"><span class="dot" style="background:var(--accent);box-shadow:0 0 12px var(--accent)"></span> Local voice</div>
+        <div class="body">
+          <div class="field">
+            <label>Service base URL</label>
+            <input placeholder="http://roamies-dgx:4000/tts" value="http://roamies-dgx:4000/tts">
+          </div>
+          <div class="field">
+            <label>API key (optional)</label>
+            <input type="password" placeholder="Blank is fine — stays in the Keychain">
+          </div>
+          <div class="field">
+            <label>Voice</label>
+            <select>
+              <option selected>parakeet-tdt (auto-discovered)</option>
+              <option>kokoro-fastcraft</option>
+              <option>custom: your model</option>
+            </select>
+          </div>
+          <div class="actions">
+            <button class="btn primary">Save</button>
+            <button class="btn">Play a test line</button>
+          </div>
+          <div class="foot test">✓ Tested. 1 sentence spoken locally in 420 ms.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="sub" style="margin-top:40px">Mockups are illustrative layout — the real panel follows the existing Rust→sidecar message protocol
+    (<code class="k">onMenu('local*')</code> handlers, <code class="k">panelState()</code>, keychain secret <code class="k">local-llm</code> / <code class="k">local-tts</code>).</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "task": "Implement the reviewed bounded slices for Roamies: (A) a Local / Light-LLM OpenAI-compatible model provider, and (B) a no-Fish LocalVoice TTS transport so spoken replies run from a local DGX/IGX service",
+  "intent": "feature",
+  "inputs": [
+    {
+      "role": "scope",
+      "path": "documentation/change-packet.md"
+    },
+    {
+      "role": "design",
+      "path": "documentation/change-packet.md"
+    },
+    {
+      "role": "conventions",
+      "path": "documentation/change-packet.md"
+    },
+    {
+      "role": "verification",
+      "path": "documentation/change-packet.md"
+    },
+    {
+      "role": "design",
+      "path": "documentation/ui-mockups.html"
+    }
+  ],
+  "writePaths": [
+    "showcase/tauri/sidecar/",
+    "documentation/"
+  ],
+  "checks": [
+    {
+      "id": "local-provider-and-speaker-tests",
+      "command": "node",
+      "args": [
+        "--test",
+        "showcase/tauri/sidecar/test/local.test.mjs"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "id": "full-sidecar-suite",
+      "command": "npm",
+      "args": [
+        "test"
+      ],
+      "timeoutMs": 180000
+    },
+    {
+      "id": "sidecar-bundle",
+      "command": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "timeoutMs": 120000
+    }
+  ]
+}
