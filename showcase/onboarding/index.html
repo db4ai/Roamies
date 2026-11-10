@@ -63,6 +63,27 @@
         </div>
       </form>
       <button class="link" type="button" id="key-toggle">Use an API key instead</button>
+      <div class="local-ai" id="local-ai" hidden>
+        <h2 class="local-h" id="local-h-id">Or use a local model</h2>
+        <p class="local-lead" id="local-lead">Your own DGX or IGX running LiteLLM. No account, no cloud bill.</p>
+        <div class="providers two" id="local-presets" role="radiogroup" aria-labelledby="local-h-id"></div>
+        <form class="inline" id="local-form">
+          <div class="label-row"><label for="local-url">Gateway URL</label></div>
+          <div class="field-row">
+            <span class="px field"><input id="local-url" type="url" placeholder="http://192.168.2.146:4000/v1" autocomplete="off" spellcheck="false"></span>
+          </div>
+          <div class="label-row"><label for="local-model">Model</label></div>
+          <div class="field-row">
+            <span class="px field"><input id="local-model" type="text" placeholder="qwen3.8:27b" autocomplete="off" spellcheck="false"></span>
+          </div>
+          <div class="label-row"><label for="local-key">Virtual key <small>(optional)</small></label></div>
+          <div class="field-row">
+            <span class="px field"><input id="local-key" type="password" placeholder="sk-… (optional)" autocomplete="off" spellcheck="false" maxlength="1000"></span>
+            <button class="px btn primary" type="submit" id="local-save">Use it</button>
+          </div>
+        </form>
+        <p class="error" id="local-error" role="alert" hidden></p>
+      </div>
       <p class="error" id="login-error" role="alert" hidden></p>
       <p class="note">Your messages, and screenshots when you ask about the screen, go to the AI provider you pick, under its privacy policy.</p>
     </section>
@@ -84,6 +105,22 @@
         <p class="note" id="fish-note">Spoken replies are billed to your own Fish Audio account.</p>
       </form>
       <p class="error" id="fish-error" role="alert" hidden></p>
+      <div class="local-ai" id="local-voice" hidden>
+        <h2 class="local-h" id="local-voice-h">Or speak from your own machine</h2>
+        <p class="local-lead">Qwen3-TTS on your DGX. No Fish Audio account, no bill.</p>
+        <form class="inline" id="local-voice-form">
+          <div class="label-row"><label for="local-voice-url">Voice server</label></div>
+          <div class="field-row">
+            <span class="px field"><input id="local-voice-url" type="url" placeholder="http://192.168.2.146:8092" autocomplete="off" spellcheck="false"></span>
+          </div>
+          <div class="label-row"><label for="local-voice-key">Server key</label></div>
+          <div class="field-row">
+            <span class="px field"><input id="local-voice-key" type="password" placeholder="media API key" autocomplete="off" spellcheck="false" maxlength="1000"></span>
+            <button class="px btn primary" type="submit" id="local-voice-save">Use it</button>
+          </div>
+        </form>
+        <p class="error" id="local-voice-error" role="alert" hidden></p>
+      </div>
     </section>
 
     <section class="step" id="step-demo" data-name="What I can do" aria-labelledby="h-demo" hidden>

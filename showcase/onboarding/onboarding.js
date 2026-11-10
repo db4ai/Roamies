@@ -436,8 +436,9 @@
     },
     enter() {
       ai.render();
-      setTimeout(() => at('ai') && quip(state?.connected ? 'Already connected!' : 'Pick one you have'), 700);
-      if (state?.connected) setTimeout(() => at('ai') && act('hype'), 900);
+      renderLocal();
+      setTimeout(() => at('ai') && quip(state?.connected ? 'Already connected!' : state?.local?.on ? 'Already on your DGX!' : 'Pick one you have'), 700);
+      if (state?.connected || state?.local?.on) setTimeout(() => at('ai') && act('hype'), 900);
       else poseFn = POSE.point(1.7, 0.05);
       aim($('providers'));
     },
@@ -462,6 +463,42 @@
     const k = (state?.apikey ?? []).find((p) => p.id === ai.key);
     if (k?.link) { send({ type: 'open_link', url: k.link }); quip('Copy it, then paste here'); }
   });
+  // A local gateway (LiteLLM on the user's own DGX/IGX): no account and no cloud bill. The presets fill the URL
+  // and a sensible model, and everything stays editable. Saving asks the sidecar to verify it before moving on.
+  const local = { busy: false, preset: null };
+  function renderLocal() {
+    const L = state?.local;
+    $('local-ai').hidden = !L;
+    if (!L) return;
+    const presets = L.presets ?? [];
+    $('local-presets').replaceChildren(...presets.map((p) => {
+      const on = local.preset === p.id || (!local.preset && L.on && L.baseUrl === p.baseUrl);
+      const b = el('button', { className: `px prov${on ? ' on' : ''}`, type: 'button' },
+        el('span', { textContent: p.label }), led(on ? 'on' : ''),
+        el('small', { textContent: L.on && L.baseUrl === p.baseUrl ? 'In use' : new URL(p.baseUrl).host }));
+      b.setAttribute('aria-pressed', String(on));
+      b.onclick = () => {
+        local.preset = p.id;
+        $('local-url').value = p.baseUrl;
+        $('local-model').value = L.model && L.baseUrl === p.baseUrl ? L.model : (p.models?.[0] ?? '');
+        quip(`${p.label}, nice`, 2);
+        renderLocal();
+      };
+      return b;
+    }));
+    if (!$('local-url').value) $('local-url').value = L.baseUrl || presets[0]?.baseUrl || '';
+    if (!$('local-model').value) $('local-model').value = L.model || presets[0]?.models?.[0] || '';
+    $('local-save').disabled = local.busy;
+  }
+  $('local-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const baseUrl = $('local-url').value.trim(), modelId = $('local-model').value.trim();
+    if (!baseUrl || !modelId) return (!baseUrl ? $('local-url') : $('local-model')).focus();
+    local.busy = true; $('local-save').disabled = true; $('local-error').hidden = true;
+    poseFn = POSE.think();
+    send({ type: 'panel_local', enabled: true, baseUrl, modelId, key: $('local-key').value.trim(), context: null });
+    $('local-key').value = '';
+  });
   $('key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('key-input').value.trim();
@@ -470,6 +507,19 @@
     poseFn = POSE.think();
     send({ type: 'ob_apikey', provider: ai.key, key });
     $('key-input').value = '';
+  });
+  // Speak from the local machine instead of signing up for Fish: one URL and the server's key.
+  $('local-voice-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const baseUrl = $('local-voice-url').value.trim() || state?.local?.tts?.baseUrl || state?.local?.ttsDefaultUrl || '';
+    if (!baseUrl) return $('local-voice-url').focus();
+    replies.saving = true;
+    $('local-voice-error').hidden = true;
+    replies.render();
+    poseFn = POSE.think();
+    quip('Checking your DGX…', 3);
+    send({ type: 'panel_localvoice', enabled: true, baseUrl, key: $('local-voice-key').value.trim() });
+    $('local-voice-key').value = '';
   });
 
   // ---------------------------------------------------------------- step 3: how replies come
@@ -481,12 +531,17 @@
   const replies = {
     pick: null, saving: false, changing: false, // changing: replacing a key that's already saved
     mode: () => replies.pick ?? (state?.replies === 'voice' ? 'voice' : 'text'),
-    ready: () => replies.mode() === 'text' || (!!state?.fishKey && state.replies === 'voice'),
+    // Either voice works: a Fish Audio key, or the Qwen3-TTS server on the local machine. Needing a Fish sign-up
+    // is exactly what the local option exists to avoid.
+    localVoice: () => !!state?.local?.tts?.on,
+    canSpeak: () => !!state?.fishKey || replies.localVoice(),
+    ready: () => replies.mode() === 'text' || (replies.canSpeak() && state.replies === 'voice'),
     render() {
-      const mode = replies.mode(), on = state?.replies === 'voice' && state?.fishKey;
+      const mode = replies.mode(), on = state?.replies === 'voice' && replies.canSpeak();
+      const local = replies.localVoice();
       const CARDS = [
         ['text', 'Text only', 'Answers in my bubbles'],
-        ['voice', 'Voice + text', on ? 'Voice is on' : mode === 'voice' ? 'Needs a Fish Audio key' : 'Said out loud too'],
+        ['voice', 'Voice + text', on ? (local && !state?.fishKey ? 'On your DGX' : 'Voice is on') : mode === 'voice' ? 'Pick a voice below' : 'Said out loud too'],
       ];
       $('replies').replaceChildren(...CARDS.map(([id, name, sub]) => {
         const checked = mode === id;
@@ -498,24 +553,42 @@
       }));
       const saved = !!state?.fishKey;
       if (!saved || mode !== 'voice') replies.changing = false;
-      $('fish-form').hidden = mode !== 'voice' || (saved && !replies.changing);
+      // The Fish fields only appear for someone who already has a key or is choosing to add one; a local voice
+      // alone fills the step, so they're hidden rather than demanding a sign-up.
+      $('fish-form').hidden = mode !== 'voice' || local || (saved && !replies.changing);
       $('fish-change').hidden = !saved || mode !== 'voice';
       $('fish-change').textContent = replies.changing ? 'Keep my current key' : 'Change key';
       $('fish-label').textContent = replies.changing ? 'New Fish Audio API key' : 'Fish Audio API key';
       $('fish-change').setAttribute('aria-expanded', String(replies.changing));
       $('fish-save').disabled = replies.saving;
       $('fish-save').textContent = replies.saving ? 'Checking…' : 'Save';
+      // The local voice block only matters on the voice choice, where it replaces the need for a Fish account.
+      const lv = $('local-voice');
+      if (lv) {
+        lv.hidden = mode !== 'voice';
+        $('local-voice-save').disabled = replies.saving;
+        $('local-voice-save').textContent = replies.saving ? 'Checking…' : local ? 'Change' : 'Use it';
+        if (!$('local-voice-url').value) $('local-voice-url').value = state?.local?.tts?.baseUrl || state?.local?.ttsDefaultUrl || '';
+        if (local) {
+          $('local-voice-h').textContent = 'Speaking from your DGX';
+          $('local-voice-url').closest('.label-row').hidden = true;
+          $('local-voice-url').closest('.field-row').hidden = true;
+        }
+      }
       nav();
     },
     choose(id) {
       if (replies.mode() === id && (id === 'text' || state?.replies === 'voice')) return;
       replies.pick = id; $('fish-error').hidden = true;
-      if (id === 'text' || state?.fishKey) {
-        if (state?.replies === id) quip(id === 'text' ? 'Text it is!' : 'Voice it is!');
+      if (id === 'text' || replies.canSpeak()) {
+        if (state?.replies === id) quip(id === 'text' ? 'Text it is!' : replies.localVoice() && !state?.fishKey ? 'Your DGX will talk!' : 'Voice it is!');
         send({ type: 'ob_replies', mode: id });
       }
       replies.render();
-      if (id === 'voice' && !state?.fishKey) { $('fish-input').focus(); quip('Got a Fish Audio key?', 3); }
+      if (id === 'voice' && !replies.canSpeak()) {
+        $('local-voice-url').focus();
+        quip('Use your DGX — no key needed', 3);
+      }
     },
     onFish(msg) {
       replies.saving = false;
@@ -527,7 +600,7 @@
       replies.render();
       poseFn = POSE.point(1.7, 0.05);
       aim($('replies'));
-      setTimeout(() => at('voice') && quip('Should I talk out loud?', 3), 700);
+      setTimeout(() => at('voice') && quip(replies.localVoice() ? 'Your DGX can talk!' : 'Should I talk out loud?', 3), 700);
     },
     leave() { poseFn = null; },
   };
@@ -1095,7 +1168,7 @@
     { name: 'welcome', enter: 'drop', next: "Let's go", onEnter: () => { look.render(); setTimeout(() => { if (at('welcome')) { act('wave'); quip('Hi there!'); } }, 650); } },
     // Windows: the voice download is optional, so it can be skipped.
     { name: 'perms', enter: 'materialize', next: 'Continue', onEnter: perms.enter, onLeave: perms.leave, ready: () => perms.done(), get skip() { return !isMac(); } },
-    { name: 'ai', enter: 'crt', next: 'Continue', onEnter: ai.enter, onLeave: ai.leave, ready: () => !!state?.connected, skip: true },
+    { name: 'ai', enter: 'crt', next: 'Continue', onEnter: ai.enter, onLeave: ai.leave, ready: () => !!(state?.connected || state?.local?.on), skip: true },
     { name: 'voice', enter: 'materialize', next: 'Continue', onEnter: replies.enter, onLeave: replies.leave, ready: () => replies.ready(), skip: true },
     { name: 'demo', enter: 'crt', next: 'Continue', onEnter: demo.enter, onLeave: demo.leave },
     { name: 'keys', enter: 'materialize', next: 'Continue', onEnter: keys.enter, onLeave: keys.leave },
@@ -1196,7 +1269,30 @@
         else $('keys-error').hidden = true;
         keys.render();
         break;
+      // A Local voice save from the guide's replies step.
+      case 'local_voice_note': {
+        replies.saving = false;
+        const e = $('local-voice-error');
+        if (e) { e.hidden = !msg.bad; e.textContent = e.title = msg.bad ? msg.text : ''; }
+        if (!msg.bad) { quip('That is my DGX talking!', 3.5); act('hype'); }
+        else quip('That did not take', 3);
+        if (at('voice')) replies.render();
+        nav?.();
+        break;
+      }
       case 'say': quip(msg.text, 3); break;
+      // A Local gateway save (from the setup guide): report it here and let the step re-render as connected.
+      case 'local_note': {
+        local.busy = false;
+        const e = $('local-error');
+        e.hidden = !msg.bad;
+        e.textContent = e.title = msg.bad ? msg.text : '';
+        if (!msg.bad) { quip('On your own machine!', 3); act('hype'); }
+        else quip('That did not take', 3);
+        if (at('ai')) { ai.render(); renderLocal(); }
+        nav?.();
+        break;
+      }
       case 'showcase': demo.on(msg); break;
       case 'voice': if (at('chat')) chat.voice(msg); else voice.on(msg); break;
       case 'speech': Roamie.voiceOut?.handle(msg); break;

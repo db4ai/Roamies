@@ -199,6 +199,16 @@ h2 { margin: 0; font: 700 13px/1.35 var(--mono); font-stretch: 87.5%; color: var
 
 /* ---------- providers ---------- */
 .providers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+/* The local gateway: its own block under the cloud sign-ins, divided so it reads as an alternative, not a third
+   card in the same grid. The form is tighter than the panel's since the guide's column is narrow. */
+.local-ai { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line, rgba(255,255,255,.12)); }
+.local-ai[hidden] { display: none; }
+.local-h { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+.local-lead { font-size: 12px; opacity: .7; margin: 0 0 10px; }
+.local-ai .field-row { margin-bottom: 8px; }
+.local-ai .label-row { margin-bottom: 3px; }
+.local-ai .label-row small { opacity: .6; font-weight: 400; }
+.local-ai input { width: 100%; }
 /* The two sign-ins and the two reply choices: two wide cards a row, room for "Downloading Claude Code… 40%". */
 .providers.two { grid-template-columns: repeat(2, 1fr); }
 /* Fourteen kinds of API key: smaller cards, three a row. */

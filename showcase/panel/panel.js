@@ -17,7 +17,7 @@
   // What's open in the panel itself: a key field (provider id or 'fish'), the row action waiting for its
   // Confirm, and how far down the long lists it shows (a page at a time) and what the memory search holds.
   const PAGE = 10, MORE = 20;
-  const ui = { key: null, kind: {}, arm: null, facts: PAGE, commits: PAGE, q: '', bindShown: new Set() };
+  const ui = { key: null, kind: {}, arm: null, facts: PAGE, commits: PAGE, q: '', bindShown: new Set(), localAdd: false, localEdit: null, localModels: {} };
   let armTimer = 0;
   const disarm = () => { clearTimeout(armTimer); if (ui.arm) { ui.arm = null; return true; } return false; };
 
@@ -338,7 +338,8 @@
         on.map((p) => el('optgroup', { label: p.label }, p.models.map((m) => el('option', { value: `${p.id}:${m.id}`, textContent: m.name, selected: `${p.id}:${m.id}` === model })))))) : null;
     return [
       group('Model', 'Which AI answers you.', null,
-        select ?? el('p', { className: 'empty', textContent: 'Sign in to an account below first.' })),
+        select ?? el('p', { className: 'empty', textContent: 'Sign in to an account below, or set up a local gateway.' })),
+      localGroup(),
       group('Accounts', 'Sign in to use their models.', null,
         el('div', { className: 'group' }, state.providers.filter((p) => p.on || p.method).map((p) => [
           el('div', { className: 'setting' },
@@ -351,6 +352,83 @@
         ]).flat())),
     ];
   }
+  // Local gateways (Light LLM): any number of OpenAI-compatible servers the user runs. Each saved one gets a
+  // row you can select, and an Add form takes a URL + optional key, then asks the gateway for its model list.
+  function localGroup() {
+    const locals = state.locals ?? [];
+    const presets = state.local?.presets ?? [];
+    const rows = locals.map((p) => el('div', { className: 'setting' },
+      el('span', {}, p.label,
+        el('small', { textContent: `${p.model ?? 'No model chosen'} · ${hostOf(p.baseUrl)}` })),
+      el('span', { className: 'row-btns' },
+        p.active
+          ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'In use')
+          : link('Use', () => send({ type: 'panel_local_select', slug: p.id }), { k: `local-use:${p.id}`, aria: `Use ${p.label}` }),
+        link('Edit', () => { ui.localEdit = ui.localEdit === p.id ? null : p.id; render(`local-edit:${p.id}`); }, { k: `local-edit:${p.id}`, aria: `Edit ${p.label}` }),
+        armed('Remove', 'Confirm', `local-rm:${p.id}`, `local_remove:${p.id}`, `Remove ${p.label}`)),
+      ui.localEdit === p.id ? el('div', { className: 'keyform', hidden: false }, localForm(p)) : null));
+    return group('Local models', 'Your own gateways (DGX, IGX, Ollama) — no cloud account.', null,
+      el('div', { className: 'group' },
+        rows.length ? rows : el('p', { className: 'empty', textContent: 'No local gateways yet.' }),
+        ui.localAdd ? localForm(null) : link('Add a gateway', () => { ui.localAdd = true; render('local-add'); }, { k: 'local-add', aria: 'Add a local gateway' })));
+  }
+
+  // The add/edit form: URL and key, then Discover to pull the model list from the gateway itself.
+  function localForm(p) {
+    const slug = p?.id ?? null;
+    const disc = ui.localModels?.[slug ?? '_new'];
+    const urlInput = el('input', { type: 'url', autocomplete: 'off', spellcheck: false, value: p?.baseUrl ?? '',
+      placeholder: 'https://spark.taila1d32f.ts.net:4000/v1', 'aria-label': 'Gateway URL' });
+    const keyInput = el('input', { type: 'password', autocomplete: 'off', spellcheck: false,
+      placeholder: p?.keyed ? 'Key saved — leave blank to keep' : 'sk-… (optional)', 'aria-label': 'Gateway API key', maxLength: 1000 });
+    const nameInput = el('input', { type: 'text', autocomplete: 'off', value: p?.label ?? '', placeholder: 'DGX Spark', 'aria-label': 'Gateway name' });
+    const find = () => send({ type: 'panel_local', discover: true, slug, baseUrl: urlInput.value.trim(), key: keyInput.value.trim() });
+    const saveModel = (id) => send({ type: 'panel_local', enabled: true, slug, label: nameInput.value.trim(),
+      baseUrl: urlInput.value.trim(), modelId: id, key: keyInput.value.trim() });
+    const save = () => send({ type: 'panel_local', enabled: true, slug, label: nameInput.value.trim(),
+      baseUrl: urlInput.value.trim(), modelId: disc?.picked ?? p?.model ?? (disc?.models?.[0]?.id ?? ''),
+      key: keyInput.value.trim(), select: !p });
+    return el('div', { className: 'local-form' },
+      el('span', { className: 'px field' }, nameInput),
+      el('span', { className: 'px field' }, urlInput),
+      el('span', { className: 'px field' }, keyInput),
+      el('div', { className: 'row-btns' },
+        btn('Find models', find, { k: `local-find:${slug}` }),
+        btn(p ? 'Save' : 'Add', save, { k: `local-save:${slug}` })),
+      disc && !disc.ok ? el('p', { className: 'error', textContent: disc.error }) : null,
+      disc?.ok ? el('div', { className: 'models' },
+        el('p', { className: 'sub', textContent: `${disc.models.length} models found — pick one` }),
+        el('div', { className: 'chips' }, disc.models.slice(0, 40).map((m) => el('button', {
+          type: 'button', className: `px chip${(disc.picked ?? p?.model) === m.id ? ' on' : ''}`,
+          on: { click: () => saveModel(m.id) },
+        }, m.name || m.id)))) : null);
+  }
+  const hostOf = (u) => { try { return new URL(u).host; } catch { return u; } };
+
+  // The Local voice (Qwen3-TTS on the DGX): its own host and port, its own key.
+  function localVoiceGroup() {
+    const t = state.local?.tts;
+    if (!t) return null;
+    const urlInput = el('input', { type: 'url', autocomplete: 'off', spellcheck: false,
+      placeholder: t.defaultUrl ?? 'http://100.119.225.87:8092', value: t.baseUrl ?? '', 'aria-label': 'Local voice server URL' });
+    const keyInput = el('input', { type: 'password', autocomplete: 'off', spellcheck: false,
+      placeholder: 'media API key', 'aria-label': 'Local voice API key', maxLength: 1000 });
+    const save = () => send({ type: 'panel_localvoice', enabled: true, baseUrl: urlInput.value.trim(),
+      model: t.model, voice: t.voice, key: keyInput.value.trim() });
+    return group('Local voice', 'Spoken replies from your own DGX, no Fish Audio key.', null,
+      el('div', { className: 'group' },
+        el('div', { className: 'setting' },
+          el('span', {}, 'Qwen3-TTS', el('small', { textContent: t.on ? `On · ${t.voice}` : 'Off' })),
+          t.on ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'Ready')
+            : el('span', { className: 'muted', textContent: 'Not set up' })),
+        el('div', { className: 'keyform' },
+          el('span', { className: 'px field' }, urlInput),
+          el('span', { className: 'px field' }, keyInput),
+          btn('Save', save, { k: 'save:localvoice' })),
+        t.on ? el('div', { className: 'setting' }, el('span', {}, 'Turn off'),
+          link('Disable', () => send({ type: 'panel_localvoice', enabled: false, baseUrl: t.baseUrl, model: t.model, voice: t.voice, verify: false }), { k: 'localvoice-off', aria: 'Turn the local voice off' })) : null));
+  }
+
   function appearancePage() {
     return [
       group('Look', 'Each look has its own name and voice.', null, lookTiles()),
@@ -389,10 +467,10 @@
     return [
       group('Spoken replies', 'Hear me as well as read me.', null,
         picks('Replies', [['text', 'Text only'], ['voice', 'Voice and text']], state.replies, (x) => {
-          if (x === 'voice' && !state.fishKey) { ui.key = 'fish'; render('key-fish'); note('Add a Fish Audio key to hear me talk.'); return; }
+          if (x === 'voice' && !state.fishKey && !state.local?.tts?.on) { ui.key = 'fish'; render('key-fish'); note('Add a Fish Audio key, or set up the local voice below, to hear me talk.'); return; }
           act(`replies:${x}`);
         }, 'replies'),
-        state.replies === 'voice' && state.fishModels?.length ? [
+        state.replies === 'voice' && state.fishModels?.length && !state.local?.tts?.on ? [
           el('p', { className: 'sub', textContent: 'Voice model' }),
           picks('Voice model', state.fishModels.map((c) => [c.id, c.name]), state.fishModel, (x) => act(`fishmodel:${x}`), 'fishmodel',
             Object.fromEntries(state.fishModels.map((c) => [c.id, `${WHY_LONG[c.id] ?? ''} ${price(c)}`.trim()]))),
@@ -405,6 +483,7 @@
             state.fishKey && ui.key !== 'fish' ? armed('Remove', 'Confirm', 'fishkey-remove', 'fishkey_remove', 'Remove the Fish Audio key') : null)),
         keyForm('fish', 'Fish Audio', (key) => send({ type: 'panel_fishkey', key })),
         v ? toggle('Auto-listen', v.on ? 'Open the mic when I end on a question' : 'Needs Voice control on', v.autoListen, () => act('autolisten'), 'autolisten') : null),
+      localVoiceGroup(),
       v ? group('Talking to me', 'Speak instead of typing.', null,
         toggle('Voice control', v.download
           ? (v.download.status === 'downloading' ? `Downloading the voice model… ${v.download.pct}%` : v.download.status === 'error' ? 'The download failed' : `Needs a ${v.download.size} download`)
@@ -591,6 +670,11 @@
     else if (m.kind === 'copied') {
       if (!m.ok && state?.bind?.[m.which]) { ui.bindShown.add(m.which); render(`bind-${m.which}`); }
       note(m.ok ? 'Copied. Paste it into a new custom shortcut.' : "Couldn't copy it. Select the command and copy it instead.", !m.ok);
+    }
+    // A gateway's model catalogue, from "Find models".
+    else if (m.kind === 'local_models') {
+      ui.localModels[m.slug ?? '_new'] = { ok: m.ok, models: m.models ?? [], error: m.error, picked: null };
+      render(`local-find:${m.slug ?? '_new'}`);
     }
   };
   send({ type: 'panel_open' });
