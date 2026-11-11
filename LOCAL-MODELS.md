@@ -117,6 +117,25 @@ was the original bug. Always bring it up through compose.
 - **Reasoning models need a real output budget.** qwen3.x/ornith/deepseek-v4 spend tokens on hidden
   `reasoning_content` before any visible text, so a small `max_tokens` returns an empty reply with
   `finish_reason: 'length'`. `LOCAL_MIN_OUTPUT_TOKENS` (1024) and `isReasoningStarved()` exist for this.
-- **A cold gateway is slow.** A model that isn't resident has to be swapped in. Measured on the DGX: 11 s warm on
-  an idle box, 131–179 s under GPU contention, ~36 s for the first TTS call while the model loads.
+### Measured latency (DGX, idle box, nothing resident)
+
+| Step | Cost |
+|---|---|
+| LLM first call, model not loaded | **8.6 s** |
+| LLM warm, same model | **1.5–1.7 s** |
+| TTS, 5 chars ("Okay.") | 0.6 s |
+| TTS, 20 chars | 1.0 s |
+| TTS, 72 chars | 3.5 s |
+| TTS, very first call after a restart | ~36 s (loads the model) |
+
+So a spoken reply costs roughly `1.5 s (LLM) + ~1 s per sentence (TTS)`, and the first reply after the DGX has
+been idle long enough to drop the model costs about 45 s. Under GPU contention those numbers were 131–179 s.
+
+TTS scales with **sentence length**, not sentence count, so short replies are cheap and long ones are not. Keeping
+replies short is the single biggest lever on perceived speed.
+
+**Keeping models warm** is the other. Ollama unloads a model after 5 minutes idle by default; set
+`OLLAMA_KEEP_ALIVE` on the DGX (e.g. `24h`) so it stays resident, or accept the ~8.6 s first-call penalty.
+The TTS container keeps its model loaded once used until the container restarts.
+
 - **The DGX has no passwordless sudo**, so it can only be power-cycled from the machine itself.
